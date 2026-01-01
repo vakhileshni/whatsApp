@@ -15,4 +15,6 @@ class Restaurant:
     delivery_fee: float = 40.0
     is_active: bool = True
     upi_id: str = ""  # UPI payment ID (e.g., restaurant@paytm or 1234567890@upi)
+    upi_password: str = ""  # Separate password for UPI management (different from login password)
+    cuisine_type: str = "both"  # "veg", "non-veg", "both", "snack", "full-meal", etc.
 

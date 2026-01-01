@@ -37,13 +37,18 @@ class OrderResponse(BaseModel):
     updated_at: str
     delivery_address: Optional[str] = None
     payment_status: str = "pending"
+    payment_method: str = "cod"  # "cod" or "online"
     customer_upi_name: Optional[str] = None
+    customer_rating: Optional[float] = None  # Rating given by customer (1-5)
 
 class OrderStatusUpdate(BaseModel):
     status: str
 
 class VerifyPaymentRequest(BaseModel):
     customer_upi_name: str
+
+class RateOrderRequest(BaseModel):
+    rating: float  # Rating from 1-5
 
 class OrderCreate(BaseModel):
     customer_phone: str
@@ -53,6 +58,9 @@ class OrderCreate(BaseModel):
     delivery_address: Optional[str] = None
     customer_latitude: Optional[float] = None  # For location-based routing
     customer_longitude: Optional[float] = None  # For location-based routing
+    restaurant_id: Optional[str] = None  # Restaurant ID if known (from menu page)
+    alternate_phone: Optional[str] = None  # Alternate contact number
+    payment_method: Optional[str] = "cod"  # "cod" or "online"
 
 def order_to_response(order) -> OrderResponse:
     """Convert Order model to OrderResponse"""
@@ -78,7 +86,9 @@ def order_to_response(order) -> OrderResponse:
         updated_at=order.updated_at,
         delivery_address=order.delivery_address,
         payment_status=getattr(order, 'payment_status', 'pending'),
-        customer_upi_name=getattr(order, 'customer_upi_name', None)
+        payment_method=getattr(order, 'payment_method', 'cod'),
+        customer_upi_name=getattr(order, 'customer_upi_name', None),
+        customer_rating=getattr(order, 'customer_rating', None)
     )
 
 @router.get("", response_model=List[OrderResponse])
@@ -117,21 +127,28 @@ async def create_order(order_data: OrderCreate):
     # Determine restaurant_id
     restaurant = None
     
-    # Option 1: Find nearest restaurant if location provided
-    if order_data.customer_latitude and order_data.customer_longitude:
+    # Option 1: Use restaurant_id if provided (from menu page)
+    if order_data.restaurant_id:
+        from repositories.restaurant_repo import get_restaurant_by_id
+        restaurant = get_restaurant_by_id(order_data.restaurant_id)
+        if not restaurant:
+            raise HTTPException(status_code=404, detail=f"Restaurant {order_data.restaurant_id} not found")
+    
+    # Option 2: Find nearest restaurant if location provided
+    if not restaurant and order_data.customer_latitude and order_data.customer_longitude:
         restaurant = find_nearest_restaurant(
             order_data.customer_latitude,
             order_data.customer_longitude
         )
     
-    # Option 2: Check if customer exists and use their restaurant
+    # Option 3: Check if customer exists and use their restaurant
     if not restaurant:
         existing_customer = get_customer_by_phone(order_data.customer_phone)
         if existing_customer:
             from repositories.restaurant_repo import get_restaurant_by_id
             restaurant = get_restaurant_by_id(existing_customer.restaurant_id)
     
-    # Option 3: Fallback to first restaurant
+    # Option 4: Fallback to first restaurant
     if not restaurant:
         restaurants = get_all_restaurants()
         if not restaurants:
@@ -150,17 +167,76 @@ async def create_order(order_data: OrderCreate):
             longitude=order_data.customer_longitude or 0.0
         ))
     
+    # Prepare delivery address with alternate phone if provided
+    final_delivery_address = order_data.delivery_address
+    if order_data.alternate_phone and final_delivery_address:
+        final_delivery_address = f"{final_delivery_address}\n\n📱 Alternate Contact: {order_data.alternate_phone}"
+    elif order_data.alternate_phone:
+        final_delivery_address = f"📱 Alternate Contact: {order_data.alternate_phone}"
+    
+    # Determine payment method
+    payment_method = order_data.payment_method or "cod"
+    
     try:
-        new_order = create_new_order(
-            restaurant_id=restaurant.id,
-            customer_id=customer.id,
-            customer_phone=order_data.customer_phone,
-            customer_name=order_data.customer_name,
-            items_data=order_data.items,
-            order_type=order_data.order_type,
-            delivery_address=order_data.delivery_address
-        )
-        return order_to_response(new_order)
+        # For Cash on Delivery: Create order immediately
+        if payment_method.lower() == "cod":
+            new_order = create_new_order(
+                restaurant_id=restaurant.id,
+                customer_id=customer.id,
+                customer_phone=order_data.customer_phone,
+                customer_name=order_data.customer_name,
+                items_data=order_data.items,
+                order_type=order_data.order_type,
+                delivery_address=final_delivery_address,
+                payment_status="pending",  # COD payment is pending (will be collected on delivery)
+                payment_method="cod"
+            )
+            
+            # Send WhatsApp notification to customer about order confirmation
+            try:
+                from services.whatsapp_service import send_order_status_notification
+                await send_order_status_notification(new_order, "pending", None)
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Failed to send WhatsApp notification for order {new_order.id}: {e}")
+            
+            return order_to_response(new_order)
+        
+        # For Online Payment: Create order, then send UPI payment link
+        elif payment_method.lower() == "online":
+            # Create order with payment_status="pending"
+            new_order = create_new_order(
+                restaurant_id=restaurant.id,
+                customer_id=customer.id,
+                customer_phone=order_data.customer_phone,
+                customer_name=order_data.customer_name,
+                items_data=order_data.items,
+                order_type=order_data.order_type,
+                delivery_address=final_delivery_address,
+                payment_status="pending",  # Payment pending until confirmed
+                payment_method="online"
+            )
+            
+            # Generate and send UPI payment link via WhatsApp
+            try:
+                from services.whatsapp_service import send_upi_payment_link
+                await send_upi_payment_link(
+                    customer_phone=order_data.customer_phone,
+                    restaurant=restaurant,
+                    order=new_order,
+                    amount=new_order.total_amount
+                )
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Failed to send UPI payment link for order {new_order.id}: {e}")
+                # Still return the order, but log the error
+            
+            return order_to_response(new_order)
+        
+        else:
+            raise HTTPException(status_code=400, detail=f"Invalid payment method: {payment_method}")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -213,6 +289,44 @@ async def verify_payment(
     
     # Save updated order
     updated_order = update_order(order)
+    
+    return order_to_response(updated_order)
+
+@router.post("/{order_id}/rate", response_model=OrderResponse)
+async def rate_order(
+    order_id: str,
+    rating_data: RateOrderRequest,
+    restaurant_id: str = Depends(auth.get_current_restaurant_id)
+):
+    """
+    Rate an order after delivery (called by customer)
+    Rating must be between 1-5
+    Note: This endpoint can be called without auth for public access
+    """
+    from repositories.order_repo import update_order
+    
+    order = get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    
+    if order.restaurant_id != restaurant_id:
+        raise HTTPException(status_code=403, detail="Not authorized to rate this order")
+    
+    # Validate rating
+    if rating_data.rating < 1 or rating_data.rating > 5:
+        raise HTTPException(status_code=400, detail="Rating must be between 1 and 5")
+    
+    # Only allow rating delivered orders
+    if order.status != "delivered":
+        raise HTTPException(status_code=400, detail="Can only rate delivered orders")
+    
+    # Update order rating
+    order.customer_rating = round(rating_data.rating, 2)
+    updated_order = update_order(order)
+    
+    # Invalidate rating cache for this restaurant
+    from repositories.rating_repo import invalidate_rating_cache
+    invalidate_rating_cache(order.restaurant_id)
     
     return order_to_response(updated_order)
 

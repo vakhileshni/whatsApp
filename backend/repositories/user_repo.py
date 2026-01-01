@@ -23,4 +23,14 @@ def get_user_by_id(user_id: str) -> Optional[User]:
     """
     return USERS.get(user_id)
 
+def create_user(user: User) -> Optional[User]:
+    """
+    Create a new user
+    Later: INSERT INTO users (...) VALUES (...)
+    """
+    if user.id in USERS:
+        return None  # User already exists
+    USERS[user.id] = user
+    return user
+
 

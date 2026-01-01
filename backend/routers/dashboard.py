@@ -3,11 +3,16 @@ Dashboard Router - API endpoints for dashboard statistics
 """
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from datetime import datetime
+from typing import Optional, Dict
+from datetime import datetime, timedelta
+import uuid
 from repositories.order_repo import get_orders_by_restaurant
 from repositories.restaurant_repo import get_restaurant_by_id, update_restaurant
 import auth
 import re
+
+# In-memory storage for UPI verification codes (in production, use Redis or database)
+_upi_verification_codes: Dict[str, Dict] = {}
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["dashboard"])
 
@@ -26,10 +31,12 @@ class RestaurantInfo(BaseModel):
     phone: str
     upi_id: str
     twilio_number: str  # WhatsApp Business number for QR codes
+    is_active: bool  # Restaurant open/closed status
 
 class UpdateUPIRequest(BaseModel):
     upi_id: str
-    password: str  # Owner password for security
+    password: str  # UPI management password (separate from login password)
+    new_password: Optional[str] = None  # Optional: set new UPI password
 
 class VerifyPaymentRequest(BaseModel):
     customer_upi_name: str
@@ -37,6 +44,12 @@ class VerifyPaymentRequest(BaseModel):
 class VerifyUPIRequest(BaseModel):
     upi_id: str
     password: str
+
+class ConfirmUPIVerificationRequest(BaseModel):
+    verification_code: str
+    upi_id: str
+    password: str
+    new_password: Optional[str] = None
 
 @router.get("/stats", response_model=DashboardStats)
 async def get_dashboard_stats(restaurant_id: str = Depends(auth.get_current_restaurant_id)):
@@ -86,7 +99,8 @@ async def get_restaurant_info(restaurant_id: str = Depends(auth.get_current_rest
         name=restaurant.name,
         phone=restaurant.phone,
         upi_id=restaurant.upi_id or "",
-        twilio_number=twilio_number
+        twilio_number=twilio_number,
+        is_active=restaurant.is_active
     )
 
 def validate_upi_id(upi_id: str):
@@ -145,23 +159,19 @@ def validate_upi_id(upi_id: str):
     
     return True, ""
 
-@router.put("/restaurant/upi", response_model=RestaurantInfo)
-async def update_restaurant_upi(
-    upi_request: UpdateUPIRequest,
+@router.post("/restaurant/upi/confirm-verification")
+async def confirm_upi_verification(
+    confirm_request: ConfirmUPIVerificationRequest,
     restaurant_id: str = Depends(auth.get_current_restaurant_id),
     user_id: str = Depends(auth.get_current_user_id)
 ):
-    """Update restaurant UPI ID (password protected and validated)"""
+    """Confirm UPI verification and update UPI ID after successful verification"""
     from repositories.user_repo import get_user_by_id
     
     # Get current user
     user = get_user_by_id(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    # Verify password
-    if user.password != upi_request.password:
-        raise HTTPException(status_code=401, detail="Invalid password. Only owner can update UPI details.")
     
     # Get restaurant
     restaurant = get_restaurant_by_id(restaurant_id)
@@ -172,15 +182,64 @@ async def update_restaurant_upi(
     if restaurant.id != user.restaurant_id:
         raise HTTPException(status_code=403, detail="You don't have permission to update this restaurant's UPI")
     
+    # Verify UPI password (separate from login password)
+    if not restaurant.upi_password:
+        if user.password != confirm_request.password:
+            raise HTTPException(status_code=401, detail="Invalid password. Please use your login password for first-time setup.")
+    else:
+        if restaurant.upi_password != confirm_request.password:
+            raise HTTPException(status_code=401, detail="Invalid UPI password. Please enter the correct UPI management password.")
+    
     # Validate UPI ID format
-    upi_id_clean = upi_request.upi_id.strip()
+    upi_id_clean = confirm_request.upi_id.strip()
     is_valid, error_message = validate_upi_id(upi_id_clean)
     
     if not is_valid:
         raise HTTPException(status_code=400, detail=error_message)
     
-    # Update UPI ID
+    # Check verification code
+    verification_key = f"{restaurant_id}:{upi_id_clean}"
+    verification_data = _upi_verification_codes.get(verification_key)
+    
+    if not verification_data:
+        raise HTTPException(status_code=400, detail="Verification code not found. Please verify UPI first.")
+    
+    # Check if expired
+    if datetime.now() > verification_data["expires_at"]:
+        del _upi_verification_codes[verification_key]
+        raise HTTPException(status_code=400, detail="Verification code has expired. Please verify UPI again.")
+    
+    # Verify the code matches
+    if verification_data["verification_code"] != confirm_request.verification_code:
+        raise HTTPException(status_code=400, detail="Invalid verification code. Please check the code from your payment transaction.")
+    
+    # Mark as verified and update UPI ID
     restaurant.upi_id = upi_id_clean
+    
+    # Update UPI password if new_password is provided
+    if confirm_request.new_password:
+        restaurant.upi_password = confirm_request.new_password
+    
+    updated_restaurant = update_restaurant(restaurant)
+    
+    if not updated_restaurant:
+        raise HTTPException(status_code=500, detail="Failed to update UPI ID")
+    
+    # Clean up verification code
+    del _upi_verification_codes[verification_key]
+    
+    # Extract Twilio number
+    from services.whatsapp_service import TWILIO_WHATSAPP_NUMBER
+    twilio_number = TWILIO_WHATSAPP_NUMBER.replace("whatsapp:", "").replace("+", "").strip()
+    
+    return RestaurantInfo(
+        id=updated_restaurant.id,
+        name=updated_restaurant.name,
+        phone=updated_restaurant.phone,
+        upi_id=updated_restaurant.upi_id,
+        twilio_number=twilio_number,
+        is_active=updated_restaurant.is_active
+    )
     updated_restaurant = update_restaurant(restaurant)
     
     if not updated_restaurant:
@@ -195,17 +254,18 @@ async def update_restaurant_upi(
         name=updated_restaurant.name,
         phone=updated_restaurant.phone,
         upi_id=updated_restaurant.upi_id,
-        twilio_number=twilio_number
+        twilio_number=twilio_number,
+        is_active=updated_restaurant.is_active
     )
 
-def generate_upi_payment_qr_data(upi_id: str, amount: float = 1.0, merchant_name: str = "Test Payment") -> str:
+def generate_upi_payment_qr_data(upi_id: str, amount: float = 1.0, merchant_name: str = "Test Payment", transaction_note: str = "UPI Verification Test") -> str:
     """
     Generate UPI payment QR code data string
     Format: upi://pay?pa=<UPI_ID>&pn=<MerchantName>&am=<Amount>&cu=INR&tn=<TransactionNote>
     """
     import urllib.parse
     encoded_name = urllib.parse.quote(merchant_name)
-    encoded_note = urllib.parse.quote("UPI Verification Test")
+    encoded_note = urllib.parse.quote(transaction_note)
     
     # Format: upi://pay?pa=<UPI_ID>&pn=<MerchantName>&am=<Amount>&cu=INR&tn=<TransactionNote>
     qr_data = f"upi://pay?pa={upi_id}&pn={encoded_name}&am={amount:.2f}&cu=INR&tn={encoded_note}"
@@ -232,10 +292,6 @@ async def verify_restaurant_upi(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # Verify password
-    if user.password != verify_request.password:
-        raise HTTPException(status_code=401, detail="Invalid password. Only owner can verify UPI details.")
-    
     # Get restaurant
     restaurant = get_restaurant_by_id(restaurant_id)
     if not restaurant:
@@ -245,6 +301,17 @@ async def verify_restaurant_upi(
     if restaurant.id != user.restaurant_id:
         raise HTTPException(status_code=403, detail="You don't have permission to verify this restaurant's UPI")
     
+    # Verify UPI password (separate from login password)
+    # If no UPI password is set yet, use login password for first-time setup
+    if not restaurant.upi_password:
+        # First time setup - use login password
+        if user.password != verify_request.password:
+            raise HTTPException(status_code=401, detail="Invalid password. Please use your login password for first-time setup.")
+    else:
+        # UPI password is set - use UPI password
+        if restaurant.upi_password != verify_request.password:
+            raise HTTPException(status_code=401, detail="Invalid UPI password. Please enter the correct UPI management password.")
+    
     # Validate UPI ID format first
     upi_id_clean = verify_request.upi_id.strip()
     is_valid, error_message = validate_upi_id(upi_id_clean)
@@ -252,15 +319,65 @@ async def verify_restaurant_upi(
     if not is_valid:
         raise HTTPException(status_code=400, detail=error_message)
     
-    # Generate UPI payment QR code data
-    qr_data = generate_upi_payment_qr_data(upi_id_clean, amount=1.0, merchant_name=restaurant.name)
+    # Generate unique verification code (6-digit number)
+    verification_code = str(uuid.uuid4().int % 1000000).zfill(6)
+    
+    # Store verification attempt (expires in 10 minutes)
+    verification_key = f"{restaurant_id}:{upi_id_clean}"
+    _upi_verification_codes[verification_key] = {
+        "verification_code": verification_code,
+        "upi_id": upi_id_clean,
+        "restaurant_id": restaurant_id,
+        "created_at": datetime.now(),
+        "expires_at": datetime.now() + timedelta(minutes=10),
+        "verified": False
+    }
+    
+    # Generate UPI payment QR code data with verification code in transaction note
+    transaction_note = f"UPI Verification Code: {verification_code}"
+    qr_data = generate_upi_payment_qr_data(upi_id_clean, amount=1.0, merchant_name=restaurant.name, transaction_note=transaction_note)
     
     return {
         "status": "success",
         "message": "UPI QR code generated for verification",
         "upi_id": upi_id_clean,
         "qr_data": qr_data,
+        "verification_code": verification_code,
         "verification_amount": 1.0,
-        "instructions": "Scan this QR code with any UPI app (PhonePe, Google Pay, Paytm) and send ₹1.00 to verify this UPI ID belongs to you."
+        "instructions": f"Scan this QR code with any UPI app (PhonePe, Google Pay, Paytm) and send ₹1.00 to verify this UPI ID. After payment, enter verification code: {verification_code}"
     }
+
+class UpdateRestaurantStatusRequest(BaseModel):
+    is_active: bool
+
+@router.patch("/restaurant/status", response_model=RestaurantInfo)
+async def update_restaurant_status(
+    status_request: UpdateRestaurantStatusRequest,
+    restaurant_id: str = Depends(auth.get_current_restaurant_id)
+):
+    """Update restaurant open/closed status"""
+    restaurant = get_restaurant_by_id(restaurant_id)
+    
+    if not restaurant:
+        raise HTTPException(status_code=404, detail="Restaurant not found")
+    
+    # Update restaurant status
+    restaurant.is_active = status_request.is_active
+    updated_restaurant = update_restaurant(restaurant)
+    
+    if not updated_restaurant:
+        raise HTTPException(status_code=500, detail="Failed to update restaurant status")
+    
+    # Extract Twilio number from format "whatsapp:+14155238886" to "14155238886"
+    from services.whatsapp_service import TWILIO_WHATSAPP_NUMBER
+    twilio_number = TWILIO_WHATSAPP_NUMBER.replace("whatsapp:", "").replace("+", "").strip()
+    
+    return RestaurantInfo(
+        id=updated_restaurant.id,
+        name=updated_restaurant.name,
+        phone=updated_restaurant.phone,
+        upi_id=updated_restaurant.upi_id or "",
+        twilio_number=twilio_number,
+        is_active=updated_restaurant.is_active
+    )
 

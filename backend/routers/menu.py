@@ -26,6 +26,8 @@ class ProductResponse(BaseModel):
     price: float
     category: str
     is_available: bool
+    discounted_price: Optional[float] = None
+    discount_percentage: Optional[float] = None
 
 class ProductCreate(BaseModel):
     name: str
@@ -33,6 +35,7 @@ class ProductCreate(BaseModel):
     price: float
     category: str
     is_available: bool = True
+    discounted_price: Optional[float] = None
 
 class ProductUpdate(BaseModel):
     name: Optional[str] = None
@@ -40,9 +43,15 @@ class ProductUpdate(BaseModel):
     price: Optional[float] = None
     category: Optional[str] = None
     is_available: Optional[bool] = None
+    discounted_price: Optional[float] = None
 
 def product_to_response(product: Product) -> ProductResponse:
     """Convert Product model to ProductResponse"""
+    # Calculate discount percentage if discounted_price is set
+    discount_percentage = None
+    if product.discounted_price and product.discounted_price < product.price:
+        discount_percentage = round(((product.price - product.discounted_price) / product.price) * 100, 1)
+    
     return ProductResponse(
         id=product.id,
         restaurant_id=product.restaurant_id,
@@ -50,7 +59,9 @@ def product_to_response(product: Product) -> ProductResponse:
         description=product.description,
         price=product.price,
         category=product.category,
-        is_available=product.is_available
+        is_available=product.is_available,
+        discounted_price=product.discounted_price,
+        discount_percentage=discount_percentage
     )
 
 @router.get("", response_model=List[ProductResponse])
@@ -73,7 +84,8 @@ async def create_product(
         description=product_data.description,
         price=product_data.price,
         category=product_data.category,
-        is_available=product_data.is_available
+        is_available=product_data.is_available,
+        discounted_price=product_data.discounted_price
     )
     
     created_product = repo_create_product(new_product)
@@ -105,6 +117,8 @@ async def update_product(
         product.category = product_data.category
     if product_data.is_available is not None:
         product.is_available = product_data.is_available
+    if product_data.discounted_price is not None:
+        product.discounted_price = product_data.discounted_price if product_data.discounted_price > 0 else None
     
     updated_product = repo_update_product(product)
     return product_to_response(updated_product)

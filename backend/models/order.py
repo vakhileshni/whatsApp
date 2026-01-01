@@ -29,7 +29,9 @@ class Order:
     updated_at: str
     delivery_address: Optional[str] = None
     payment_status: str = "pending"  # "pending", "verified", "failed"
+    payment_method: str = "cod"  # "cod" or "online"
     customer_upi_name: Optional[str] = None  # UPI name shown when payment is verified
+    customer_rating: Optional[float] = None  # Rating given by customer after delivery (1-5)
     # For backward compatibility
     @property
     def subtotal(self) -> float:

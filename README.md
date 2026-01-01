@@ -77,9 +77,9 @@ python main.py
 ```
 
 Backend will be available at:
-- **API**: http://localhost:8000
-- **API Docs**: http://localhost:8000/docs (Swagger UI)
-- **ReDoc**: http://localhost:8000/redoc
+- **API**: http://localhost:4000
+- **API Docs**: http://localhost:4000/docs (Swagger UI)
+- **ReDoc**: http://localhost:4000/redoc
 
 ### Frontend Setup
 
@@ -207,7 +207,7 @@ To integrate:
    - Orders will appear when created (via API or webhook)
 
 4. **Test API directly:**
-   - Visit http://localhost:8000/docs
+   - Visit http://localhost:4000/docs
    - Use "Authorize" button to add JWT token
    - Test endpoints interactively
 

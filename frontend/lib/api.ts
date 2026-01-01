@@ -1,6 +1,6 @@
 // API Client for WhatsApp Ordering SaaS Backend
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 
 // Types
 export interface LoginRequest {
@@ -24,6 +24,8 @@ export interface Product {
   name: string;
   description: string;
   price: number;
+  discounted_price?: number;
+  discount_percentage?: number;
   category: string;
   is_available: boolean;
 }
@@ -32,6 +34,7 @@ export interface ProductCreate {
   name: string;
   description: string;
   price: number;
+  discounted_price?: number;
   category: string;
   is_available?: boolean;
 }
@@ -40,6 +43,7 @@ export interface ProductUpdate {
   name?: string;
   description?: string;
   price?: number;
+  discounted_price?: number;
   category?: string;
   is_available?: boolean;
 }
@@ -65,6 +69,9 @@ export interface Order {
   created_at: string;
   updated_at: string;
   delivery_address?: string;
+  payment_method?: string;  // "cod" or "online"
+  customer_rating?: number;  // Rating given by customer (1-5)
+  total_amount?: number;  // Alias for total
 }
 
 export interface DashboardStats {
@@ -83,6 +90,7 @@ export interface RestaurantInfo {
   phone: string;
   upi_id: string;
   twilio_number: string;  // WhatsApp Business number for QR codes
+  is_active: boolean;  // Restaurant open/closed status
 }
 
 export interface UpdateUPIRequest {
@@ -104,6 +112,7 @@ export interface VerifyUPIResponse {
   message: string;
   upi_id: string;
   qr_data: string;
+  verification_code: string;
   verification_amount: number;
   instructions: string;
 }
@@ -279,10 +288,22 @@ class ApiClient {
     return this.request<RestaurantInfo>('/api/v1/dashboard/restaurant');
   }
 
-  async updateRestaurantUPI(upi_id: string, password: string): Promise<RestaurantInfo> {
-    return this.request<RestaurantInfo>('/api/v1/dashboard/restaurant/upi', {
-      method: 'PUT',
-      body: JSON.stringify({ upi_id, password }),
+  async confirmUPIVerification(verification_code: string, upi_id: string, password: string, new_password?: string): Promise<RestaurantInfo> {
+    return this.request<RestaurantInfo>('/api/v1/dashboard/restaurant/upi/confirm-verification', {
+      method: 'POST',
+      body: JSON.stringify({ 
+        verification_code,
+        upi_id, 
+        password,
+        new_password: new_password || undefined
+      }),
+    });
+  }
+
+  async updateRestaurantStatus(is_active: boolean): Promise<RestaurantInfo> {
+    return this.request<RestaurantInfo>('/api/v1/dashboard/restaurant/status', {
+      method: 'PATCH',
+      body: JSON.stringify({ is_active }),
     });
   }
 
@@ -298,6 +319,36 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify({ upi_id, password }),
     });
+  }
+
+  // Public API (no authentication required) - for customers ordering via WhatsApp
+  async getPublicMenu(restaurantId: string): Promise<{
+    restaurant: {
+      id: string;
+      name: string;
+      address: string;
+      delivery_fee: number;
+      upi_id: string;
+    };
+    categories: Array<{
+      name: string;
+      items: Array<{
+        id: string;
+        name: string;
+        description: string;
+        price: number;
+        discounted_price?: number;
+        discount_percentage?: number;
+        is_available?: boolean;
+      }>;
+    }>;
+  }> {
+    // Public endpoint - no auth token needed
+    const response = await fetch(`${API_BASE_URL}/api/public/menu/${restaurantId}`);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch menu: ${response.statusText}`);
+    }
+    return response.json();
   }
 }
 

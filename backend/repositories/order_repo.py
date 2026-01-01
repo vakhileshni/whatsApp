@@ -48,6 +48,10 @@ def update_order_status(order_id: str, status: str) -> Optional[Order]:
         order.status = status
         from datetime import datetime
         order.updated_at = datetime.now().isoformat()
+        
+        # Invalidate rating cache when order status changes
+        from repositories.rating_repo import invalidate_rating_cache
+        invalidate_rating_cache(order.restaurant_id)
     return order
 
 def get_order_by_customer_id(customer_id: str) -> List[Order]:

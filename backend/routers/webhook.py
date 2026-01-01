@@ -6,14 +6,39 @@ Backend identifies restaurant based on first WhatsApp message
 from fastapi import APIRouter, HTTPException, Form
 from pydantic import BaseModel
 from typing import Optional
-from services.whatsapp_service import send_whatsapp_message
-from data.restaurants import get_restaurant_by_id, is_valid_restaurant_id
-from services.session_manager import (
-    get_customer_restaurant,
-    set_customer_restaurant,
-    is_customer_mapped
-)
+from repositories.restaurant_repo import get_restaurant_by_id, get_all_restaurants
 import logging
+
+# Stub function for sending WhatsApp messages (not implemented in whatsapp_service)
+async def send_whatsapp_message(to_number: str, message: str):
+    """
+    Stub function for sending WhatsApp messages via Twilio
+    This should be implemented using Twilio client
+    """
+    logger.info(f"📤 WhatsApp message would be sent to {to_number}: {message}")
+    # TODO: Implement actual Twilio message sending
+    pass
+
+# Stub functions for session management (using session repo instead)
+def is_valid_restaurant_id(restaurant_id: str) -> bool:
+    """Check if restaurant_id is valid"""
+    restaurant = get_restaurant_by_id(restaurant_id)
+    return restaurant is not None
+
+# Simple in-memory mapping for customer to restaurant (temporary solution)
+_customer_restaurant_map = {}
+
+def get_customer_restaurant(customer_phone: str) -> Optional[str]:
+    """Get restaurant_id for a customer"""
+    return _customer_restaurant_map.get(customer_phone)
+
+def set_customer_restaurant(customer_phone: str, restaurant_id: str):
+    """Map customer to restaurant"""
+    _customer_restaurant_map[customer_phone] = restaurant_id
+
+def is_customer_mapped(customer_phone: str) -> bool:
+    """Check if customer is mapped to a restaurant"""
+    return customer_phone in _customer_restaurant_map
 
 logger = logging.getLogger(__name__)
 
@@ -36,20 +61,31 @@ def normalize_phone_number(phone: str) -> str:
         phone = "91" + phone
     return phone
 
-def format_menu_message(restaurant: dict) -> str:
+def format_menu_message(restaurant) -> str:
     """
     Format restaurant menu as WhatsApp message
+    restaurant can be either a Restaurant model object or dict
     """
-    menu_items = restaurant.get("menu", [])
-    if not menu_items:
-        return f"*{restaurant['name']}*\n\nSorry, no menu items available at the moment."
+    from repositories.product_repo import get_products_by_restaurant
     
-    message = f"🍽️ *{restaurant['name']} - Menu*\n\n"
+    # Get menu items for the restaurant
+    menu_items = get_products_by_restaurant(restaurant.id)
+    
+    # Get restaurant name and UPI ID
+    restaurant_name = restaurant.name if hasattr(restaurant, 'name') else restaurant.get('name', 'Restaurant')
+    upi_id = restaurant.upi_id if hasattr(restaurant, 'upi_id') else restaurant.get('upi_id', '')
+    
+    if not menu_items:
+        return f"*{restaurant_name}*\n\nSorry, no menu items available at the moment."
+    
+    message = f"🍽️ *{restaurant_name} - Menu*\n\n"
     message += "━━━━━━━━━━━━━━━━\n\n"
     
-    for item in menu_items:
-        message += f"• *{item['name']}*\n"
-        message += f"  💰 ₹{item['price']}\n\n"
+    for idx, item in enumerate(menu_items, 1):
+        if item.is_available:
+            message += f"{idx}. *{item.name}*\n"
+            message += f"   {item.description}\n"
+            message += f"   💰 ₹{item.price:.0f}\n\n"
     
     message += "━━━━━━━━━━━━━━━━\n"
     message += "💬 *How to Order:*\n"
@@ -57,8 +93,8 @@ def format_menu_message(restaurant: dict) -> str:
     message += "Example: '1' or 'Margherita Pizza'\n\n"
     
     # Add UPI info if available
-    if restaurant.get("upi_id"):
-        message += f"💳 *Payment:* Send amount to {restaurant['upi_id']}\n\n"
+    if upi_id:
+        message += f"💳 *Payment:* Send amount to {upi_id}\n\n"
     
     message += "Thank you for choosing us! 🙏"
     
@@ -133,19 +169,19 @@ async def process_whatsapp_message(from_number: str, to_number: str, body: str):
             
             # Save customer → restaurant mapping
             set_customer_restaurant(customer_phone, restaurant_id)
-            logger.info(f"✅ Restaurant identified: {restaurant['name']} (ID: {restaurant_id})")
+            logger.info(f"✅ Restaurant identified: {restaurant.name} (ID: {restaurant_id})")
             
             # Format and send welcome message with menu
             menu_message = format_menu_message(restaurant)
             await send_whatsapp_message(from_number, menu_message)
             
-            logger.info(f"✅ Menu sent to {customer_phone} for restaurant {restaurant['name']}")
+            logger.info(f"✅ Menu sent to {customer_phone} for restaurant {restaurant.name}")
             
             return {
                 "status": "success",
                 "message": "Restaurant identified and menu sent",
                 "restaurant_id": restaurant_id,
-                "restaurant_name": restaurant["name"],
+                "restaurant_name": restaurant.name,
                 "customer_phone": customer_phone
             }
         
@@ -165,7 +201,7 @@ async def process_whatsapp_message(from_number: str, to_number: str, body: str):
                     "message": "Restaurant not found for mapped customer"
                 }
             
-            logger.info(f"💬 Processing order/chat message for {restaurant['name']} (ID: {restaurant_id})")
+            logger.info(f"💬 Processing order/chat message for {restaurant.name} (ID: {restaurant_id})")
             
             # For now, respond with a simple acknowledgment
             # TODO: Implement order processing logic here
@@ -190,7 +226,7 @@ async def process_whatsapp_message(from_number: str, to_number: str, body: str):
                 "status": "success",
                 "message": "Order/chat message processed",
                 "restaurant_id": restaurant_id,
-                "restaurant_name": restaurant["name"],
+                "restaurant_name": restaurant.name,
                 "customer_phone": customer_phone
             }
     

@@ -17,7 +17,9 @@ def create_new_order(
     customer_name: str,
     items_data: List[dict],
     order_type: str,
-    delivery_address: str = None
+    delivery_address: str = None,
+    payment_status: str = "pending",
+    payment_method: str = "cod"
 ) -> Order:
     """
     Create a new order with business logic validation
@@ -75,7 +77,9 @@ def create_new_order(
         status="pending",
         created_at=now,
         updated_at=now,
-        delivery_address=delivery_address
+        delivery_address=delivery_address,
+        payment_status=payment_status,
+        payment_method=payment_method
     )
     
     return create_order(new_order)

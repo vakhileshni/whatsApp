@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { apiClient } from '@/lib/api';
 
 export default function LoginPage() {
@@ -14,6 +15,18 @@ export default function LoginPage() {
   useEffect(() => {
     if (apiClient.isAuthenticated()) {
       router.push('/dashboard');
+      return;
+    }
+    
+    // Check for signup success message
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('signup') === 'success') {
+        // Show success message
+        setTimeout(() => {
+          alert('✅ Account created successfully! Please login with your credentials.');
+        }, 100);
+      }
     }
   }, [router]);
 
@@ -37,17 +50,21 @@ export default function LoginPage() {
       <div className="max-w-md w-full">
         {/* Logo/Header */}
         <div className="text-center mb-8">
-          <div className="mx-auto h-16 w-16 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-2xl flex items-center justify-center shadow-lg mb-4">
-            <svg className="h-10 w-10 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z" />
-            </svg>
+          <div className="flex items-center justify-center gap-3 mb-4">
+            <div className="h-12 w-12 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-xl flex items-center justify-center shadow-lg flex-shrink-0">
+              <svg className="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z" />
+              </svg>
+            </div>
+            <div className="text-left">
+              <h2 className="text-3xl sm:text-4xl font-bold text-gray-900 mb-1">
+                WhatsApp Ordering
+              </h2>
+              <p className="text-base sm:text-lg text-gray-600">
+                Restaurant Admin Portal
+              </p>
+            </div>
           </div>
-          <h2 className="text-4xl font-bold text-gray-900 mb-2">
-            WhatsApp Ordering
-          </h2>
-          <p className="text-lg text-gray-600">
-            Restaurant Admin Portal
-          </p>
         </div>
 
         {/* Login Card */}
@@ -137,48 +154,14 @@ export default function LoginPage() {
             </div>
           </form>
 
-          {/* Demo Credentials */}
-          <div className="mt-6 pt-6 border-t border-gray-200">
-              <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl p-4 border border-blue-100">
-              <p className="text-xs font-semibold text-blue-900 mb-3 uppercase tracking-wide">Demo Credentials</p>
-              <div className="space-y-2 text-sm max-h-64 overflow-y-auto">
-                <div className="flex items-start">
-                  <span className="font-medium text-blue-700 mr-2">🍽️</span>
-                  <div>
-                    <p className="text-blue-900 font-medium">Spice Garden</p>
-                    <p className="text-blue-600 text-xs mt-0.5">admin@spicegarden.com / admin123</p>
-                  </div>
-                </div>
-                <div className="flex items-start">
-                  <span className="font-medium text-blue-700 mr-2">🍕</span>
-                  <div>
-                    <p className="text-blue-900 font-medium">Pizza Paradise</p>
-                    <p className="text-blue-600 text-xs mt-0.5">admin@pizzaparadise.com / admin123</p>
-                  </div>
-                </div>
-                <div className="flex items-start">
-                  <span className="font-medium text-blue-700 mr-2">🍣</span>
-                  <div>
-                    <p className="text-blue-900 font-medium">Sushi Masters</p>
-                    <p className="text-blue-600 text-xs mt-0.5">admin@sushimasters.com / admin123</p>
-                  </div>
-                </div>
-                <div className="flex items-start">
-                  <span className="font-medium text-blue-700 mr-2">🍔</span>
-                  <div>
-                    <p className="text-blue-900 font-medium">Burger Hub</p>
-                    <p className="text-blue-600 text-xs mt-0.5">admin@burgerhub.com / admin123</p>
-                  </div>
-                </div>
-                <div className="flex items-start">
-                  <span className="font-medium text-blue-700 mr-2">🔥</span>
-                  <div>
-                    <p className="text-blue-900 font-medium">Tandoor Express</p>
-                    <p className="text-blue-600 text-xs mt-0.5">admin@tandoorexpress.com / admin123</p>
-                  </div>
-                </div>
-              </div>
-            </div>
+          {/* Sign Up Link */}
+          <div className="mt-6 pt-6 border-t border-gray-200 text-center">
+            <p className="text-sm text-gray-600">
+              Don't have an account?{' '}
+              <Link href="/signup" className="font-semibold text-blue-600 hover:text-blue-700">
+                Sign Up
+              </Link>
+            </p>
           </div>
         </div>
 

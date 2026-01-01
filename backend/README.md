@@ -25,13 +25,13 @@ python main.py
 
 Or using uvicorn directly:
 ```bash
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+uvicorn main:app --reload --host 0.0.0.0 --port 4000
 ```
 
-The API will be available at: http://localhost:8000
+The API will be available at: http://localhost:4000
 
-API Documentation (Swagger UI): http://localhost:8000/docs
-Alternative docs (ReDoc): http://localhost:8000/redoc
+API Documentation (Swagger UI): http://localhost:4000/docs
+Alternative docs (ReDoc): http://localhost:4000/redoc
 
 ## API Endpoints
 
@@ -62,20 +62,20 @@ Download and install ngrok from: https://ngrok.com/download
 python main.py
 ```
 
-The server will run on `http://localhost:8000`
+The server will run on `http://localhost:4000`
 
 ### Step 3: Start ngrok tunnel
 
 In a new terminal, run:
 
 ```bash
-ngrok http 8000
+ngrok http 4000
 ```
 
 You'll see output like:
 
 ```
-Forwarding    https://abcd1234.ngrok-free.app -> http://localhost:8000
+Forwarding    https://abcd1234.ngrok-free.app -> http://localhost:4000
 ```
 
 Copy the HTTPS URL (e.g., `https://abcd1234.ngrok-free.app`)
