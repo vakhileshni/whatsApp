@@ -6,7 +6,7 @@ from datetime import datetime
 # CONFIG
 # ============================================================
 PROJECT_PATH = r"C:\Users\rana\Desktop\WhatApp bussines"
-GITHUB_URL = "https://github.com/vakhileshni/ak.git"
+GITHUB_URL = "https://github.com/vakhileshni/test.git"
 COMMIT_MESSAGE = f"Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
 # Absolute Git path (CRITICAL for Windows + venv)
