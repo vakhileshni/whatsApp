@@ -295,3 +295,6 @@ Comprehensive settings page for restaurant owners to manage notifications, subsc
 3. Data export/backup
 4. Analytics and reporting
 
+
+
+

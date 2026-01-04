@@ -1,6 +1,14 @@
 import subprocess
 import os
+import sys
+import shutil
 from datetime import datetime
+
+# Fix Windows console encoding for emojis
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # ============================================================
 # CONFIG
@@ -9,21 +17,62 @@ PROJECT_PATH = r"C:\Users\rana\Desktop\WhatApp bussines"
 GITHUB_URL = "https://github.com/vakhileshni/whatsApp.git"
 COMMIT_MESSAGE = f"Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
-# Absolute Git path (CRITICAL for Windows + venv)
-GIT = r"C:\Program Files\Git\cmd\git.exe"
+# ============================================================
+# GIT DETECTION
+# ============================================================
+def find_git():
+    """Find Git executable on Windows"""
+    # Try common Git installation paths on Windows
+    common_paths = [
+        r"C:\Program Files\Git\cmd\git.exe",
+        r"C:\Program Files (x86)\Git\cmd\git.exe",
+        r"C:\Program Files\Git\bin\git.exe",
+        r"C:\Program Files (x86)\Git\bin\git.exe",
+    ]
+    
+    # First try to find git in PATH
+    git_path = shutil.which("git")
+    if git_path:
+        return git_path
+    
+    # Try common installation paths
+    for path in common_paths:
+        if os.path.exists(path):
+            return path
+    
+    # Try where command on Windows
+    try:
+        result = subprocess.run("where git", shell=True, capture_output=True, text=True, timeout=5)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip().split('\n')[0]
+    except:
+        pass
+    
+    return None
+
+GIT = find_git()
+if not GIT:
+    GIT = "git"  # Fallback to PATH
 
 # ============================================================
 # UTILITIES
 # ============================================================
 def git_cmd(args, ignore_errors=False):
-    """Run git command using absolute git.exe"""
-    cmd = [GIT] + args
+    """Run git command"""
+    # Use git directly from PATH (it's working)
+    cmd = "git " + " ".join(f'"{arg}"' if " " in str(arg) else str(arg) for arg in args)
+    
+    # Preserve environment PATH
+    env = os.environ.copy()
+    
     result = subprocess.run(
         cmd,
+        shell=True,
         capture_output=True,
         text=True,
         encoding="utf-8",
-        errors="replace"
+        errors="replace",
+        env=env
     )
 
     if result.stdout.strip():
@@ -36,17 +85,18 @@ def git_cmd(args, ignore_errors=False):
 
 
 def check_git_installed():
-    if not os.path.exists(GIT):
-        print("❌ Git executable not found.")
-        print("Expected path:", GIT)
-        return False
-
-    code, out = git_cmd(["--version"])
-    if code == 0:
-        print(f"✅ {out}\n")
+    # Preserve environment PATH
+    env = os.environ.copy()
+    result = subprocess.run("git --version", shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
+    if result.returncode == 0:
+        print(f"✅ {result.stdout.strip()}\n")
         return True
-
-    print("❌ Git exists but cannot be executed.")
+    
+    print("❌ Git is not installed or not found in PATH.")
+    print("📋 Troubleshooting steps:")
+    print("   1. Make sure Git is installed: https://git-scm.com/downloads")
+    print("   2. Restart your terminal/command prompt after installing Git")
+    print("   3. Check if Git is in PATH: Open Command Prompt and type 'git --version'")
     return False
 
 
