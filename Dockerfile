@@ -33,7 +33,15 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Install Node.js dependencies (Frontend)
 WORKDIR /app/frontend
+
+# Allow setting API URL at build time (defaults to localhost:4000)
+ARG NEXT_PUBLIC_API_URL=http://localhost:4000
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+
 RUN npm install --legacy-peer-deps
+
+# Build frontend for production
+RUN npm run build
 
 # Create startup script
 RUN printf '#!/bin/bash\n\
@@ -42,17 +50,36 @@ set -e\n\
 echo "==========================================="\n\
 echo "Starting WhatsApp Business Application"\n\
 echo "==========================================="\n\
-echo "Starting Backend API on port 4000..."\n\
+\n\
+# Start backend in background\n\
+echo "🚀 Starting Backend API on port 4000..."\n\
 cd /app/backend\n\
-echo "Backend will be available at: http://0.0.0.0:4000"\n\
-echo "API Documentation: http://0.0.0.0:4000/docs"\n\
+uvicorn main:app --host 0.0.0.0 --port 4000 &\n\
+BACKEND_PID=$!\n\
+\n\
+# Wait for backend to start\n\
+sleep 3\n\
+\n\
+# Start frontend in background\n\
+echo "🚀 Starting Frontend on port 3000..."\n\
+cd /app/frontend\n\
+npm start -- -p 3000 &\n\
+FRONTEND_PID=$!\n\
+\n\
 echo ""\n\
-# Start backend (foreground process)\n\
-exec uvicorn main:app --host 0.0.0.0 --port 4000\n\
+echo "✅ Services started:"\n\
+echo "   Backend API: http://0.0.0.0:4000"\n\
+echo "   API Docs: http://0.0.0.0:4000/docs"\n\
+echo "   Frontend: http://0.0.0.0:3000"\n\
+echo ""\n\
+echo "Press Ctrl+C to stop all services"\n\
+\n\
+# Wait for processes\n\
+wait $BACKEND_PID $FRONTEND_PID\n\
 ' > /app/start.sh && chmod +x /app/start.sh
 
-# Expose port
-EXPOSE 4000
+# Expose ports
+EXPOSE 3000 4000
 
 # Set working directory
 WORKDIR /app
