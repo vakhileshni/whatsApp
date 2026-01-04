@@ -15,7 +15,7 @@ if sys.platform == 'win32':
 # ============================================================
 PROJECT_PATH = r"C:\Users\rana\Desktop\WhatApp bussines"
 GITHUB_URL = "https://github.com/vakhileshni/whatsApp.git"
-COMMIT_MESSAGE = f"Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+COMMIT_MESSAGE = f"Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - Added Dockerfile, EC2 deployment config, and updated features"
 
 # ============================================================
 # GIT DETECTION
@@ -152,12 +152,17 @@ code, _ = git_cmd(["add", "."])
 if code != 0:
     exit(1)
 
-# 4️⃣ Commit
-if has_changes():
+# 4️⃣ Check for changes before committing
+has_uncommitted = has_changes()
+if has_uncommitted:
     print(f"💾 Committing: {COMMIT_MESSAGE}")
-    git_cmd(["commit", "-m", COMMIT_MESSAGE], ignore_errors=True)
+    code, _ = git_cmd(["commit", "-m", COMMIT_MESSAGE])
+    if code == 0:
+        print("✅ Changes committed successfully\n")
+    else:
+        print("⚠️ Commit failed, but continuing...\n")
 else:
-    print("ℹ️ No changes to commit")
+    print("ℹ️ No changes to commit\n")
 
 print()
 
@@ -174,13 +179,16 @@ print(f"✅ Remote set to {GITHUB_URL}\n")
 
 # 7️⃣ Push
 print("⬆️ Pushing to GitHub...\n")
-code, _ = git_cmd(["push", "-u", "origin", "main"], ignore_errors=True)
+code, _ = git_cmd(["push", "-u", "origin", "main"])
 if code != 0:
-    print("⚠️ Normal push failed. Trying force push...")
-    code, _ = git_cmd(["push", "--force", "-u", "origin", "main"])
-    if code != 0:
-        print("❌ Push failed")
-        exit(1)
+    print("⚠️ Push failed. This might be due to:")
+    print("   1. Authentication issues (use GitHub credentials or SSH key)")
+    print("   2. Remote branch has commits not in local branch")
+    print("   3. Network connectivity issues")
+    print("\n💡 Try running manually:")
+    print(f"   git push -u origin main")
+    print("\n❌ Push failed - please check the error above")
+    exit(1)
 
 print("\n" + "=" * 60)
 print("✅ Project pushed to GitHub successfully!")
