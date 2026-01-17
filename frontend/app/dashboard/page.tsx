@@ -37,9 +37,8 @@ export default function DashboardPage() {
   const [showUPIModal, setShowUPIModal] = useState(false);
   const [upiForm, setUpiForm] = useState({ upi_id: '', password: '', new_password: '' });
   const [showChangePassword, setShowChangePassword] = useState(false);
-  const [showPaymentVerify, setShowPaymentVerify] = useState(false);
-  const [paymentUpiName, setPaymentUpiName] = useState('');
   const [showUPIVerify, setShowUPIVerify] = useState(false);
+  const [showQRCodeModal, setShowQRCodeModal] = useState(false);
   const [upiVerifyData, setUpiVerifyData] = useState<{upi_id: string; qr_data: string; verification_code: string; amount: number} | null>(null);
   const [verificationCodeInput, setVerificationCodeInput] = useState('');
 
@@ -49,13 +48,43 @@ export default function DashboardPage() {
       return;
     }
     
-    // Fetch restaurant info from backend
+    // Fetch restaurant info from backend (no extra timeout here –
+    // api client already has its own timeout and error handling)
     const loadRestaurantInfo = async () => {
+      // Check if user is authenticated before making request
+      if (!apiClient.isAuthenticated()) {
+        // Not authenticated - use fallback
+        const localInfo = apiClient.getRestaurantInfoFromStorage();
+        if (localInfo) {
+          setRestaurantInfo({ 
+            name: localInfo.name, 
+            id: localInfo.id, 
+            phone: localInfo.phone, 
+            upi_id: '',
+            twilio_number: '14155238886',
+            is_active: true
+          });
+        }
+        return;
+      }
+
       try {
         const info = await apiClient.getRestaurantInfo();
         setRestaurantInfo(info);
       } catch (err) {
-        console.error('Failed to load restaurant info:', err);
+        // Silently handle network errors - don't spam console
+        const isNetworkError = err instanceof Error && (
+          err.message.includes('Failed to fetch') || 
+          err.message.includes('Network error') ||
+          err.message.includes('Cannot connect') ||
+          err.message.includes('timeout')
+        );
+        
+        // Don't log network errors - they're expected if backend is down
+        if (!isNetworkError && process.env.NODE_ENV === 'development') {
+          console.warn('Failed to load restaurant info:', err);
+        }
+        
         // Fallback to localStorage if API fails
         const localInfo = apiClient.getRestaurantInfoFromStorage();
         if (localInfo) {
@@ -64,8 +93,18 @@ export default function DashboardPage() {
             id: localInfo.id, 
             phone: localInfo.phone, 
             upi_id: '',
-            twilio_number: '14155238886', // Default fallback
-            is_active: true // Default to open
+            twilio_number: '14155238886',
+            is_active: true
+          });
+        } else {
+          // Minimal fallback so UI can still render
+          setRestaurantInfo({ 
+            name: 'Restaurant', 
+            id: '', 
+            phone: '', 
+            upi_id: '',
+            twilio_number: '14155238886',
+            is_active: true
           });
         }
       }
@@ -94,14 +133,27 @@ export default function DashboardPage() {
       if (isInitialLoad) {
       setLoading(true);
       }
+      // Try to fetch data with error handling for each request
       const [statsData, ordersData, menuData] = await Promise.all([
-        apiClient.getDashboardStats(),
-        apiClient.getOrders(),
-        apiClient.getMenu()
+        apiClient.getDashboardStats().catch(err => {
+          console.warn('Failed to load stats:', err);
+          return null; // Return null instead of throwing
+        }),
+        apiClient.getOrders().catch(err => {
+          console.warn('Failed to load orders:', err);
+          return []; // Return empty array instead of throwing
+        }),
+        apiClient.getMenu().catch(err => {
+          console.warn('Failed to load menu:', err);
+          return []; // Return empty array instead of throwing
+        })
       ]);
       
+      // Only process orders if we got data
+      const validOrders = Array.isArray(ordersData) ? ordersData : [];
+      
       // Check for orders in each status that need attention
-      const pendingOrders = ordersData.filter(order => order.status.toLowerCase() === 'pending');
+      const pendingOrders = validOrders.filter(order => order.status.toLowerCase() === 'pending');
       const preparingOrders = ordersData.filter(order => order.status.toLowerCase() === 'preparing');
       const readyOrders = ordersData.filter(order => order.status.toLowerCase() === 'ready');
       
@@ -144,9 +196,14 @@ export default function DashboardPage() {
       }
       
       // Update state - React will handle efficient re-renders
-      setStats(statsData);
-      setOrders(ordersData);
-      setMenu(menuData);
+      // Only update if we got valid data
+      if (statsData) {
+        setStats(statsData);
+      }
+      setOrders(validOrders);
+      if (Array.isArray(menuData)) {
+        setMenu(menuData);
+      }
       
       setError('');
     } catch (err) {
@@ -274,31 +331,50 @@ export default function DashboardPage() {
   // Helper function to filter orders by time period
   const filterOrdersByTimePeriod = (ordersList: Order[], period: string) => {
     const now = new Date();
-    now.setHours(23, 59, 59, 999); // End of today
     
     return ordersList.filter(order => {
+      if (!order.created_at) return false;
+      
+      // Parse order date - handle both ISO string and Date object
       const orderDate = new Date(order.created_at);
+      
+      // Check if date is valid
+      if (isNaN(orderDate.getTime())) {
+        console.warn('Invalid order date:', order.created_at);
+        return false;
+      }
+      
+      // Get current date components (local timezone)
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const startOfToday = new Date(today.getTime());
+      startOfToday.setHours(0, 0, 0, 0);
+      
+      const endOfToday = new Date(today.getTime());
+      endOfToday.setHours(23, 59, 59, 999);
+      
+      // Get order date components (local timezone)
+      const orderDateOnly = new Date(orderDate.getFullYear(), orderDate.getMonth(), orderDate.getDate());
       
       switch (period) {
         case 'today':
-          const startOfToday = new Date(now);
-          startOfToday.setHours(0, 0, 0, 0);
-          return orderDate >= startOfToday;
+          // Compare dates only (ignore time) - use date comparison
+          return orderDateOnly.getTime() === startOfToday.getTime();
         
         case 'last2days':
-          const twoDaysAgo = new Date(now);
+          const twoDaysAgo = new Date(today);
           twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
           twoDaysAgo.setHours(0, 0, 0, 0);
-          return orderDate >= twoDaysAgo;
+          return orderDate >= twoDaysAgo && orderDate <= endOfToday;
         
         case 'thisweek':
-          const startOfWeek = new Date(now);
-          startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay());
+          const startOfWeek = new Date(today);
+          const dayOfWeek = startOfWeek.getDay();
+          startOfWeek.setDate(startOfWeek.getDate() - dayOfWeek);
           startOfWeek.setHours(0, 0, 0, 0);
-          return orderDate >= startOfWeek;
+          return orderDate >= startOfWeek && orderDate <= endOfToday;
         
         case 'lastweek':
-          const endOfLastWeek = new Date(now);
+          const endOfLastWeek = new Date(today);
           endOfLastWeek.setDate(endOfLastWeek.getDate() - endOfLastWeek.getDay() - 1);
           endOfLastWeek.setHours(23, 59, 59, 999);
           const startOfLastWeek = new Date(endOfLastWeek);
@@ -308,7 +384,8 @@ export default function DashboardPage() {
         
         case 'month':
           const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-          return orderDate >= startOfMonth;
+          startOfMonth.setHours(0, 0, 0, 0);
+          return orderDate >= startOfMonth && orderDate <= endOfToday;
         
         case 'all':
         default:
@@ -317,16 +394,17 @@ export default function DashboardPage() {
     });
   };
 
-  // Get filtered orders based on status and time period
+  // Get filtered orders based on status only (time period filter only applies to stats/reports)
   const getFilteredOrders = () => {
     let filtered = orders;
     
-    // Apply status filter first
+    // Apply status filter only
     if (orderFilter !== 'all') {
-      filtered = filtered.filter(order => order.status.toLowerCase() === orderFilter);
-    } else {
-      // Only apply time period filter when showing "All" orders
-      filtered = filterOrdersByTimePeriod(filtered, timePeriodFilter);
+      filtered = filtered.filter(order => {
+        const orderStatus = (order.status || '').toLowerCase().trim();
+        const filterStatus = orderFilter.toLowerCase().trim();
+        return orderStatus === filterStatus;
+      });
     }
     
     return filtered;
@@ -493,27 +571,6 @@ export default function DashboardPage() {
     await handleVerifyUPI();
   };
 
-  const handleVerifyPayment = async () => {
-    if (!selectedOrder) return;
-    if (!paymentUpiName.trim()) {
-      alert('Please enter customer UPI name');
-      return;
-    }
-    try {
-      await apiClient.verifyPayment(selectedOrder.id, paymentUpiName.trim());
-      await fetchData(false); // Refresh without loading state
-      // Update selected order
-      const updatedOrder = orders.find(o => o.id === selectedOrder.id);
-      if (updatedOrder) {
-        setSelectedOrder(updatedOrder);
-      }
-      setShowPaymentVerify(false);
-      setPaymentUpiName('');
-      alert('Payment verified successfully!');
-    } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to verify payment');
-    }
-  };
 
   const handleViewOrderDetails = (order: Order) => {
     // Open order details in a new page
@@ -718,12 +775,12 @@ export default function DashboardPage() {
               )}
               <button
                 onClick={() => {
-                  setUpiForm({ upi_id: restaurantInfo?.upi_id || '', password: '', new_password: '' });
-                  setShowChangePassword(false);
-                  setShowUPIModal(true);
+                  setShowUPIModal(false);
+                  setShowUPIVerify(false);
+                  setShowQRCodeModal(true);
                 }}
                 className="flex items-center px-3 sm:px-4 py-2 text-xs sm:text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition duration-200 flex-shrink-0"
-                title="Manage UPI Payment Details"
+                title="View UPI QR Code"
               >
                 <svg className="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -769,13 +826,29 @@ export default function DashboardPage() {
         )}
 
         {/* Compact Stats Cards */}
-        {stats && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+        {stats && (() => {
+          // Calculate filtered stats based on time period
+          const filteredOrders = filterOrdersByTimePeriod(orders, timePeriodFilter);
+          const filteredStats = {
+            total_orders: filteredOrders.length,
+            pending_orders: filteredOrders.filter(o => o.status.toLowerCase() === 'pending').length,
+            today_orders: filteredOrders.filter(o => {
+              const orderDate = new Date(o.created_at);
+              const today = new Date();
+              return orderDate.toDateString() === today.toDateString();
+            }).length,
+            total_revenue: filteredOrders
+              .filter(o => o.payment_status === 'verified' || o.payment_method === 'cod')
+              .reduce((sum, o) => sum + o.total, 0)
+          };
+          
+          return (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
             <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-lg p-2 border border-blue-200">
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-xs font-medium text-blue-700 mb-0.5">Total Orders</p>
-                  <p className="text-lg font-bold text-blue-900">{stats.total_orders}</p>
+                  <p className="text-lg font-bold text-blue-900">{filteredStats.total_orders}</p>
                 </div>
                 <div className="p-1 bg-blue-200 rounded-lg">
                   <svg className="h-3 w-3 text-blue-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -800,7 +873,7 @@ export default function DashboardPage() {
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-xs font-medium text-yellow-700 mb-0.5">Pending</p>
-                  <p className="text-lg font-bold text-yellow-900">{stats.pending_orders}</p>
+                  <p className="text-lg font-bold text-yellow-900">{filteredStats.pending_orders}</p>
                 </div>
                 <div className="p-1 bg-yellow-200 rounded-lg">
                   <svg className="h-3 w-3 text-yellow-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -814,7 +887,7 @@ export default function DashboardPage() {
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-xs font-medium text-indigo-700 mb-0.5">Today</p>
-                  <p className="text-lg font-bold text-indigo-900">{stats.today_orders}</p>
+                  <p className="text-lg font-bold text-indigo-900">{filteredStats.today_orders}</p>
                 </div>
                 <div className="p-1 bg-indigo-200 rounded-lg">
                   <svg className="h-3 w-3 text-indigo-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -828,7 +901,7 @@ export default function DashboardPage() {
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-xs font-medium text-green-700 mb-0.5">Revenue</p>
-                  <p className="text-lg font-bold text-green-900">₹{stats.total_revenue.toFixed(0)}</p>
+                  <p className="text-lg font-bold text-green-900">₹{filteredStats.total_revenue.toFixed(0)}</p>
                 </div>
                 <div className="p-1 bg-green-200 rounded-lg">
                   <svg className="h-3 w-3 text-green-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -838,7 +911,8 @@ export default function DashboardPage() {
               </div>
             </div>
           </div>
-        )}
+          );
+        })()}
 
         {/* Tabs */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 mb-6">
@@ -914,67 +988,78 @@ export default function DashboardPage() {
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
-                {(['all', 'pending', 'preparing', 'ready', 'delivered'] as const).map((filter) => (
+                {(['all', 'pending', 'preparing', 'ready', 'delivered'] as const).map((filter) => {
+                  // Calculate count for each specific filter, not based on current orderFilter
+                  const getCountForFilter = (filterType: string) => {
+                    if (filterType === 'all') {
+                      return orders.length;
+                    }
+                    return orders.filter(order => order.status.toLowerCase() === filterType).length;
+                  };
+                  
+                  return (
+                    <button
+                      key={filter}
+                      onClick={() => setOrderFilter(filter)}
+                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                        orderFilter === filter
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                      } ${filter === 'pending' && hasNewPendingOrder ? 'animate-pulse ring-2 ring-yellow-400' : ''} ${filter === 'preparing' && hasNewPreparingOrder ? 'animate-pulse ring-2 ring-blue-400' : ''} ${filter === 'ready' && hasNewReadyOrder ? 'animate-pulse ring-2 ring-green-400' : ''}`}
+                    >
+                      {filter === 'all' && `All Orders (${getCountForFilter('all')})`}
+                      {filter === 'pending' && `Pending (${getCountForFilter('pending')})`}
+                      {filter === 'preparing' && `Preparing (${getCountForFilter('preparing')})`}
+                      {filter === 'ready' && `Ready (${getCountForFilter('ready')})`}
+                      {filter === 'delivered' && `Delivered (${getCountForFilter('delivered')})`}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Time Period Filter and CSV Download */}
+            <div className="mb-3 sm:mb-4 bg-gray-50 p-3 rounded-lg border border-gray-200">
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs sm:text-sm font-semibold text-gray-700 flex items-center gap-1.5">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                  </svg>
+                  📅 Time Period:
+                </label>
+                <button
+                  onClick={downloadCSV}
+                  className="px-3 py-1.5 bg-green-600 text-white text-xs sm:text-sm font-semibold rounded-lg hover:bg-green-700 transition-all flex items-center gap-1.5 shadow-sm hover:shadow-md"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  Download CSV
+                </button>
+              </div>
+              <div className="flex gap-1.5 sm:gap-2 flex-wrap">
+                {[
+                  { value: 'today', label: 'Today' },
+                  { value: 'last2days', label: 'Last 2 Days' },
+                  { value: 'thisweek', label: 'This Week' },
+                  { value: 'lastweek', label: 'Last Week' },
+                  { value: 'month', label: 'This Month' },
+                  { value: 'all', label: 'All Time' }
+                ].map((period) => (
                   <button
-                    key={filter}
-                    onClick={() => setOrderFilter(filter)}
-                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                      orderFilter === filter
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                    } ${filter === 'pending' && hasNewPendingOrder ? 'animate-pulse ring-2 ring-yellow-400' : ''} ${filter === 'preparing' && hasNewPreparingOrder ? 'animate-pulse ring-2 ring-blue-400' : ''} ${filter === 'ready' && hasNewReadyOrder ? 'animate-pulse ring-2 ring-green-400' : ''}`}
+                    key={period.value}
+                    onClick={() => setTimePeriodFilter(period.value as any)}
+                    className={`px-2.5 sm:px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-all ${
+                      timePeriodFilter === period.value
+                        ? 'bg-indigo-600 text-white shadow-md'
+                        : 'bg-white text-gray-700 hover:bg-gray-100 border border-gray-300'
+                    }`}
                   >
-                    {filter === 'all' && `All Orders (${getFilteredOrders().length})`}
-                    {filter === 'pending' && `Pending (${orders.filter(o => o.status.toLowerCase() === 'pending').length})`}
-                    {filter === 'preparing' && `Preparing (${orders.filter(o => o.status.toLowerCase() === 'preparing').length})`}
-                    {filter === 'ready' && `Ready (${orders.filter(o => o.status.toLowerCase() === 'ready').length})`}
-                    {filter === 'delivered' && `Delivered (${orders.filter(o => o.status.toLowerCase() === 'delivered').length})`}
+                    {period.label}
                   </button>
                 ))}
               </div>
             </div>
-
-            {/* Time Period Filter and CSV Download - Only show in "All" filter */}
-            {orderFilter === 'all' && (
-              <div className="mb-3 sm:mb-4 bg-gray-50 p-3 rounded-lg border border-gray-200">
-                <div className="flex items-center justify-between mb-2">
-                  <label className="text-xs sm:text-sm font-semibold text-gray-700">
-                    📅 Time Period:
-                  </label>
-                  <button
-                    onClick={downloadCSV}
-                    className="px-3 py-1.5 bg-green-600 text-white text-xs sm:text-sm font-semibold rounded-lg hover:bg-green-700 transition-all flex items-center gap-1.5 shadow-sm hover:shadow-md"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                    Download CSV
-                  </button>
-                </div>
-                <div className="flex gap-1.5 sm:gap-2 flex-wrap">
-                  {[
-                    { value: 'today', label: 'Today' },
-                    { value: 'last2days', label: 'Last 2 Days' },
-                    { value: 'thisweek', label: 'This Week' },
-                    { value: 'lastweek', label: 'Last Week' },
-                    { value: 'month', label: 'This Month' },
-                    { value: 'all', label: 'All Time' }
-                  ].map((period) => (
-                    <button
-                      key={period.value}
-                      onClick={() => setTimePeriodFilter(period.value as any)}
-                      className={`px-2.5 sm:px-3 py-1.5 rounded-lg text-xs sm:text-sm font-semibold transition-all ${
-                        timePeriodFilter === period.value
-                          ? 'bg-indigo-600 text-white shadow-md'
-                          : 'bg-white text-gray-700 hover:bg-gray-100 border border-gray-300'
-                      }`}
-                    >
-                      {period.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
 
             {/* Orders Display - List format for "All", Cards for status filters */}
             {orders.length === 0 ? (
@@ -1077,7 +1162,7 @@ export default function DashboardPage() {
                           {order.order_type === 'Delivery' ? `₹${order.delivery_fee.toFixed(2)}` : '₹0.00'}
                         </td>
                         <td className="px-4 py-3 whitespace-nowrap text-sm font-bold text-gray-900 border-r border-gray-200">
-                          ₹{order.total_amount.toFixed(2)}
+                          ₹{(order.total_amount || order.total || 0).toFixed(2)}
                         </td>
                         <td className="px-4 py-3 whitespace-nowrap border-r border-gray-200">
                           <span className={`text-xs font-semibold ${
@@ -1093,19 +1178,6 @@ export default function DashboardPage() {
                         <td className="px-4 py-3 whitespace-nowrap text-sm">
                           {order.status.toLowerCase() === 'pending' && (
                             <div className="flex flex-col gap-1">
-                              {order.payment_method === 'online' && order.payment_status !== 'verified' && (
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setSelectedOrder(order);
-                                    setShowPaymentVerify(true);
-                                    setPaymentUpiName('');
-                                  }}
-                                  className="px-2 py-1 bg-blue-600 text-white text-xs font-semibold rounded hover:bg-blue-700 transition-all"
-                                >
-                                  💳 Verify
-                                </button>
-                              )}
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -1222,20 +1294,6 @@ export default function DashboardPage() {
                             >
                               👁️ View
                             </button>
-                            {order.payment_method === 'online' && order.payment_status !== 'verified' && (
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setSelectedOrder(order);
-                                  setShowPaymentVerify(true);
-                                  setPaymentUpiName('');
-                                }}
-                                className="ml-2 px-2 py-1 bg-green-600 text-white text-xs font-semibold rounded hover:bg-green-700 transition-all"
-                                title="Verify payment"
-                              >
-                                💳 Verify
-                              </button>
-                            )}
                           </div>
                           <span className={`px-2 sm:px-3 py-0.5 sm:py-1 text-xs font-bold rounded-full shadow-sm ${getStatusColor(order.status)}`}>
                             {order.status.toUpperCase()}
@@ -1388,7 +1446,10 @@ export default function DashboardPage() {
                         {order.status.toLowerCase() === 'pending' && (
                           <div className="grid grid-cols-2 gap-2">
                             <button
-                              onClick={() => handleUpdateOrderStatus(order.id, 'preparing')}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleUpdateOrderStatus(order.id, 'preparing');
+                              }}
                               className="w-full px-4 py-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white rounded-lg hover:from-blue-700 hover:to-blue-800 text-sm font-bold transition-all duration-200 shadow-md hover:shadow-lg transform hover:scale-105"
                             >
                               ✓ Mark for Preparing
@@ -1916,71 +1977,6 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* Payment Verification Modal */}
-        {showPaymentVerify && selectedOrder && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4" onClick={() => setShowPaymentVerify(false)}>
-            <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 sm:p-8" onClick={(e) => e.stopPropagation()}>
-              <div className="flex items-center justify-between mb-6">
-                <h2 className="text-2xl font-bold text-gray-900">Verify Payment</h2>
-                <button
-                  onClick={() => setShowPaymentVerify(false)}
-                  className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
-                >
-                  <svg className="h-6 w-6 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-              
-              <div className="space-y-4">
-                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                  <p className="text-sm text-blue-900 mb-2">
-                    <span className="font-semibold">Order ID:</span> #{selectedOrder.id.slice(-6).toUpperCase()}
-                  </p>
-                  <p className="text-sm text-blue-900">
-                    <span className="font-semibold">Amount:</span> ₹{selectedOrder.total.toFixed(2)}
-                  </p>
-                  {restaurantInfo?.upi_id && (
-                    <p className="text-xs text-blue-700 mt-2">
-                      Expected UPI: <span className="font-semibold">{restaurantInfo.upi_id}</span>
-                    </p>
-                  )}
-                </div>
-                
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    Customer UPI Name
-                  </label>
-                  <input
-                    type="text"
-                    value={paymentUpiName}
-                    onChange={(e) => setPaymentUpiName(e.target.value)}
-                    placeholder="Enter the UPI name shown in payment notification"
-                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-green-500 transition duration-200"
-                    required
-                  />
-                  <p className="text-xs text-gray-500 mt-1">Enter the name shown in your UPI payment notification from the customer</p>
-                </div>
-                
-                <div className="flex gap-3 pt-4">
-                  <button
-                    onClick={handleVerifyPayment}
-                    className="flex-1 px-4 py-3 bg-gradient-to-r from-green-600 to-green-700 text-white rounded-xl hover:from-green-700 hover:to-green-800 font-semibold transition-all duration-200 shadow-md"
-                  >
-                    ✓ Verify Payment
-                  </button>
-                  <button
-                    onClick={() => setShowPaymentVerify(false)}
-                    className="flex-1 px-4 py-3 bg-gray-200 text-gray-700 rounded-xl hover:bg-gray-300 font-semibold transition-colors duration-200"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
         {/* QR Code Modal - Full Screen for Better Visibility */}
         {showQRCode && restaurantInfo && (
           <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4" onClick={() => setShowQRCode(false)}>
@@ -2045,6 +2041,81 @@ export default function DashboardPage() {
                   </button>
                 </div>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* UPI QR Code Modal */}
+        {showQRCodeModal && restaurantInfo && (
+          <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4" onClick={() => setShowQRCodeModal(false)}>
+            <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 sm:p-8" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between mb-6">
+                <h2 className="text-2xl font-bold text-gray-900">UPI QR Code</h2>
+                <button
+                  onClick={() => setShowQRCodeModal(false)}
+                  className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+                >
+                  <svg className="h-6 w-6 text-gray-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              {restaurantInfo.upi_qr_code ? (
+                <div className="space-y-4">
+                  <div className="flex flex-col items-center p-6 bg-gray-50 rounded-xl border-2 border-dashed border-gray-300">
+                    <img 
+                      src={restaurantInfo.upi_qr_code} 
+                      alt="UPI QR Code" 
+                      className="w-64 h-64 object-contain mb-4"
+                    />
+                    {restaurantInfo.upi_id && (
+                      <p className="text-sm font-mono text-gray-700 mt-2">UPI ID: {restaurantInfo.upi_id}</p>
+                    )}
+                  </div>
+                  <p className="text-sm text-gray-600 text-center">
+                    Customers can scan this QR code to make UPI payments
+                  </p>
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => {
+                        const link = document.createElement('a');
+                        link.href = restaurantInfo.upi_qr_code!;
+                        link.download = 'upi-qr-code.png';
+                        link.click();
+                      }}
+                      className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors"
+                    >
+                      📥 Download
+                    </button>
+                    <button
+                      onClick={() => router.push('/dashboard/settings')}
+                      className="flex-1 px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 font-medium transition-colors"
+                    >
+                      ⚙️ Manage in Settings
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4 text-center">
+                  <div className="p-8 bg-gray-50 rounded-xl">
+                    <svg className="w-24 h-24 mx-auto text-gray-400 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
+                    </svg>
+                    <p className="text-gray-600 mb-4">No QR code has been set up yet.</p>
+                    <p className="text-sm text-gray-500 mb-6">Go to Settings to upload or generate your UPI QR code.</p>
+                    <button
+                      onClick={() => {
+                        setShowQRCodeModal(false);
+                        router.push('/dashboard/settings');
+                      }}
+                      className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors"
+                    >
+                      Go to Settings
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}

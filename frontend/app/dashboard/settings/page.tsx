@@ -78,6 +78,7 @@ interface AccountSettings {
 }
 
 interface OrderSettings {
+  delivery_available: boolean;
   auto_accept_orders: boolean;
   default_preparation_time: number; // minutes
   minimum_order_value: number;
@@ -88,7 +89,7 @@ interface OrderSettings {
 
 export default function SettingsPage() {
   const router = useRouter();
-  const [activeTab, setActiveTab] = useState<'notifications' | 'subscription' | 'profile' | 'account' | 'orders' | 'support'>('notifications');
+  const [activeTab, setActiveTab] = useState<'notifications' | 'subscription' | 'payments' | 'profile' | 'account' | 'orders' | 'support'>('notifications');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [restaurantInfo, setRestaurantInfo] = useState<RestaurantInfo | null>(null);
@@ -109,6 +110,12 @@ export default function SettingsPage() {
 
   // UPI payment form state
   const [upiId, setUpiId] = useState('');
+  
+  // UPI QR code management state
+  const [upiQrCode, setUpiQrCode] = useState('');
+  const [qrCodeFile, setQrCodeFile] = useState<File | null>(null);
+  const [savingQrCode, setSavingQrCode] = useState(false);
+  const [showQrCodeModal, setShowQrCodeModal] = useState(false);
 
   // Wallet selection
   const [selectedWallet, setSelectedWallet] = useState<'paytm' | 'phonepe' | 'gpay' | null>(null);
@@ -255,6 +262,7 @@ export default function SettingsPage() {
   });
 
   const [orderSettings, setOrderSettings] = useState<OrderSettings>({
+    delivery_available: true,
     auto_accept_orders: false,
     default_preparation_time: 30,
     minimum_order_value: 0,
@@ -269,33 +277,118 @@ export default function SettingsPage() {
       return;
     }
     
+    // Only load once on mount
     loadSettings();
-  }, [router]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Empty dependency array - only run on mount
 
   const loadSettings = async () => {
     try {
       setLoading(true);
-      const info = await apiClient.getRestaurantInfo();
+      
+      // Add timeout to prevent infinite loading
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Request timeout - backend may not be responding')), 10000)
+      );
+      
+      const infoPromise = apiClient.getRestaurantInfo();
+      const info = await Promise.race([infoPromise, timeoutPromise]) as any;
+      
       setRestaurantInfo(info);
       
-      // Load notification settings (from localStorage for now, later from API)
-      const savedNotifications = localStorage.getItem('notification_settings');
-      if (savedNotifications) {
-        setNotificationSettings(JSON.parse(savedNotifications));
+      // Load UPI QR code
+      if (info.upi_qr_code && info.upi_qr_code.trim().length > 0) {
+        setUpiQrCode(info.upi_qr_code);
+        console.log('✅ Loaded QR code from database:', {
+          length: info.upi_qr_code.length,
+          type: info.upi_qr_code.substring(0, 30) + '...',
+          startsWith: info.upi_qr_code.substring(0, 20)
+        });
       } else {
+        setUpiQrCode(''); // Clear if empty
+        console.log('ℹ️ No QR code found in database for restaurant:', info.id);
+      }
+      
+      // Load settings from database
+      try {
+        const settingsData = await apiClient.getSettings();
+        setNotificationSettings({
+          whatsapp_enabled: settingsData.whatsapp_notifications_enabled,
+          whatsapp_number: settingsData.whatsapp_number || info.phone || '',
+          email_enabled: settingsData.email_notifications_enabled,
+          email_address: settingsData.email_address || '',
+          sms_enabled: settingsData.sms_notifications_enabled,
+          sms_number: settingsData.sms_number || '',
+          notify_new_order: settingsData.notify_new_order,
+          notify_preparing: settingsData.notify_preparing,
+          notify_ready: settingsData.notify_ready,
+          notify_delivered: settingsData.notify_delivered,
+          notify_cancelled: settingsData.notify_cancelled,
+          notify_payment: settingsData.notify_payment,
+          sound_enabled: settingsData.sound_enabled,
+          blink_enabled: settingsData.blink_enabled,
+        });
+        
+        setOrderSettings({
+          delivery_available: settingsData.delivery_available !== false,
+          auto_accept_orders: settingsData.auto_accept_orders,
+          default_preparation_time: settingsData.default_preparation_time,
+          minimum_order_value: settingsData.minimum_order_value,
+          maximum_order_value: settingsData.maximum_order_value || null,
+          allow_order_modifications: settingsData.allow_order_modifications,
+          cancellation_policy: settingsData.cancellation_policy || '',
+        });
+
+        // Load profile-related settings from settings table (if present)
+        setProfileSettings(prev => ({
+          ...prev,
+          delivery_radius: settingsData.delivery_radius_km ?? prev.delivery_radius,
+          gst_number: settingsData.gst_number || prev.gst_number,
+          pan_number: settingsData.pan_number || prev.pan_number,
+          fssai_number: settingsData.fssai_number || prev.fssai_number,
+          // If operating_hours JSON string is present, parse and merge
+          ...(settingsData.operating_hours
+            ? { operating_hours: { ...prev.operating_hours, ...JSON.parse(settingsData.operating_hours) } }
+            : {})
+        }));
+      } catch (err) {
+        console.warn('Failed to load settings from database, using defaults:', err);
         // Set default WhatsApp number from restaurant info
         setNotificationSettings(prev => ({
           ...prev,
           whatsapp_number: info.phone || '',
         }));
+      }
 
-      // Load profile settings
+      // Load profile settings from restaurant info
       setProfileSettings(prev => ({
         ...prev,
         restaurant_name: info.name || '',
         phone: info.phone || '',
-        address: '', // TODO: Load from API
+        address: info.address || '',
+        latitude: info.latitude || 0,
+        longitude: info.longitude || 0,
+        // delivery_radius can be calculated or set default
+        // operating_hours, gst_number, pan_number, fssai_number need separate storage
       }));
+
+      // Load account (owner) settings from backend
+      try {
+        const profile = await apiClient.getCurrentUserProfile();
+        setAccountSettings(prev => ({
+          ...prev,
+          owner_name: profile.owner_name || '',
+          owner_email: profile.owner_email || '',
+          owner_phone: profile.restaurant_phone || info.phone || '',
+        }));
+        
+        // Also set email in profile settings from owner email
+        setProfileSettings(prev => ({
+          ...prev,
+          email: profile.owner_email || '',
+        }));
+      } catch (e) {
+        console.warn('Failed to load account (owner) info, using defaults', e);
       }
       
       // TODO: Load subscription info from API
@@ -304,7 +397,20 @@ export default function SettingsPage() {
       
     } catch (err) {
       console.error('Failed to load settings:', err);
+      const errorMessage = err instanceof Error ? err.message : 'Failed to load settings';
+      
+      // Always set loading to false even on error
+      setLoading(false);
+      
+      // Show user-friendly error
+      if (errorMessage.includes('Failed to connect') || errorMessage.includes('timeout')) {
+        const backendUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+        alert(`⚠️ Cannot connect to backend server!\n\nPlease ensure:\n1. Backend is running at ${backendUrl}\n2. Backend is accessible\n3. No firewall blocking the connection\n\nYou can still use the page, but some features may not work.`);
+      } else {
+        alert(`⚠️ Error loading settings: ${errorMessage}\n\nThe page will still load, but some data may be missing.`);
+      }
     } finally {
+      // Ensure loading is always set to false
       setLoading(false);
     }
   };
@@ -312,15 +418,29 @@ export default function SettingsPage() {
   const handleSaveNotifications = async () => {
     try {
       setSaving(true);
-      // Save to localStorage for now
-      localStorage.setItem('notification_settings', JSON.stringify(notificationSettings));
       
-      // TODO: Save to backend API
-      // await apiClient.updateNotificationSettings(notificationSettings);
+      // Save to backend API
+      await apiClient.updateNotificationSettings({
+        whatsapp_notifications_enabled: notificationSettings.whatsapp_enabled,
+        whatsapp_number: notificationSettings.whatsapp_number || undefined,
+        email_notifications_enabled: notificationSettings.email_enabled,
+        email_address: notificationSettings.email_address || undefined,
+        sms_notifications_enabled: notificationSettings.sms_enabled,
+        sms_number: notificationSettings.sms_number || undefined,
+        notify_new_order: notificationSettings.notify_new_order,
+        notify_preparing: notificationSettings.notify_preparing,
+        notify_ready: notificationSettings.notify_ready,
+        notify_delivered: notificationSettings.notify_delivered,
+        notify_cancelled: notificationSettings.notify_cancelled,
+        notify_payment: notificationSettings.notify_payment,
+        sound_enabled: notificationSettings.sound_enabled,
+        blink_enabled: notificationSettings.blink_enabled,
+      });
       
-      alert('✅ Notification settings saved successfully!');
+      alert('✅ Notification settings saved successfully to database!');
     } catch (err) {
-      alert('Failed to save notification settings');
+      console.error('Failed to save notification settings:', err);
+      alert('Failed to save notification settings: ' + (err instanceof Error ? err.message : 'Unknown error'));
     } finally {
       setSaving(false);
     }
@@ -328,10 +448,15 @@ export default function SettingsPage() {
 
   const handleTestNotification = async () => {
     try {
-      // TODO: Send test notification via API
-      alert('📱 Test notification sent! Check your WhatsApp.');
-    } catch (err) {
-      alert('Failed to send test notification');
+      setSaving(true);
+      const response = await apiClient.sendTestNotification();
+      alert(`✅ ${response.message}\n\nRecipient: ${response.recipient}`);
+    } catch (err: any) {
+      console.error('Failed to send test notification:', err);
+      const errorMessage = err?.message || 'Failed to send test notification. Please check your WhatsApp number in settings.';
+      alert(`❌ ${errorMessage}`);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -459,40 +584,200 @@ export default function SettingsPage() {
   const handleSaveProfile = async () => {
     try {
       setSaving(true);
-      // TODO: Save to backend API
-      // await apiClient.updateRestaurantProfile(profileSettings);
-      alert('✅ Profile settings saved successfully!');
+      await apiClient.updateProfileSettings({
+        restaurant_name: profileSettings.restaurant_name,
+        phone: profileSettings.phone,
+        address: profileSettings.address,
+        latitude: profileSettings.latitude,
+        longitude: profileSettings.longitude,
+        delivery_radius_km: profileSettings.delivery_radius,
+        gst_number: profileSettings.gst_number || null,
+        pan_number: profileSettings.pan_number || null,
+        fssai_number: profileSettings.fssai_number || null,
+        operating_hours: profileSettings.operating_hours,
+      });
+      alert('✅ Profile settings saved successfully to database!');
     } catch (err) {
-      alert('Failed to save profile settings');
+      console.error('Failed to save profile settings:', err);
+      alert('Failed to save profile settings: ' + (err instanceof Error ? err.message : 'Unknown error'));
     } finally {
       setSaving(false);
     }
   };
 
-  const handleSaveAccount = async () => {
-    try {
-      if (accountSettings.new_password && accountSettings.new_password !== accountSettings.confirm_password) {
-        alert('New password and confirm password do not match');
+  const handleQrCodeFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      if (file.size > 5 * 1024 * 1024) { // 5MB limit
+        alert('File size should be less than 5MB');
         return;
       }
-
-      if (accountSettings.new_password && accountSettings.new_password.length < 6) {
-        alert('New password must be at least 6 characters');
+      if (!file.type.startsWith('image/')) {
+        alert('Please select an image file');
         return;
+      }
+      setQrCodeFile(file);
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const base64 = reader.result as string;
+        setUpiQrCode(base64);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleGenerateQrCode = () => {
+    if (!restaurantInfo?.upi_id) {
+      alert('Please set UPI ID first');
+      return;
+    }
+    // Generate QR code from UPI ID
+    const qrData = `upi://pay?pa=${encodeURIComponent(restaurantInfo.upi_id)}&pn=${encodeURIComponent(restaurantInfo.name)}&am=&cu=INR`;
+    const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&margin=2&data=${encodeURIComponent(qrData)}`;
+    setUpiQrCode(qrCodeUrl);
+  };
+
+  const handleSaveQrCode = async () => {
+    if (!upiQrCode) {
+      alert('Please upload or generate a QR code');
+      return;
+    }
+
+    // Validate QR code format
+    if (!upiQrCode.startsWith('data:image/') && !upiQrCode.startsWith('http://') && !upiQrCode.startsWith('https://')) {
+      alert('Invalid QR code format. Please upload an image file or generate a QR code.');
+      return;
+    }
+
+    try {
+      setSavingQrCode(true);
+      console.log('Saving QR code to database...', {
+        length: upiQrCode.length,
+        type: upiQrCode.substring(0, 50) + '...',
+        isBase64: upiQrCode.startsWith('data:image/')
+      });
+      
+      const updated = await apiClient.saveUPIQRCode(upiQrCode);
+      
+      console.log('✅ QR code save response:', {
+        upi_id: updated?.upi_id,
+        has_qr_code: !!updated?.upi_qr_code,
+        qr_length: updated?.upi_qr_code?.length
+      });
+      
+      // Verify it was saved
+      if (updated && updated.upi_qr_code && updated.upi_qr_code.length > 0) {
+        // Update state immediately
+        setRestaurantInfo(updated);
+        setUpiQrCode(updated.upi_qr_code);
+        
+        // Check if UPI ID was extracted
+        if (updated.upi_id && updated.upi_id.trim().length > 0) {
+          console.log('✅ UPI ID automatically extracted:', updated.upi_id);
+          alert(`✅ QR code saved successfully!\n\n✅ UPI ID automatically extracted: ${updated.upi_id}`);
+        } else {
+          console.warn('⚠️ UPI ID was not extracted from QR code');
+          alert('✅ QR code saved successfully!\n\n⚠️ Note: UPI ID was not automatically extracted. Please check backend logs or manually set UPI ID.');
+        }
+        
+        // Verify it matches (compare first 100 chars for base64)
+        const sentPreview = upiQrCode.substring(0, Math.min(100, upiQrCode.length));
+        const receivedPreview = updated.upi_qr_code.substring(0, Math.min(100, updated.upi_qr_code.length));
+        
+        if (sentPreview === receivedPreview || updated.upi_qr_code === upiQrCode) {
+          console.log('QR code saved successfully', {
+            length: updated.upi_qr_code.length,
+            preview: updated.upi_qr_code.substring(0, 50),
+            upi_id: updated.upi_id
+          });
+        } else {
+          console.warn('QR code preview mismatch (but saved)', {
+            sentLength: upiQrCode.length,
+            receivedLength: updated.upi_qr_code.length
+          });
+        }
+        
+        // Refresh restaurant info to ensure UPI ID is loaded
+        try {
+          const refreshedInfo = await apiClient.getRestaurantInfo();
+          console.log('🔄 Refreshed restaurant info:', {
+            upi_id: refreshedInfo.upi_id,
+            has_qr: !!refreshedInfo.upi_qr_code
+          });
+          setRestaurantInfo(refreshedInfo);
+        } catch (refreshErr) {
+          console.warn('Failed to refresh restaurant info:', refreshErr);
+        }
+      } else {
+        console.error('QR code not returned from server', updated);
+        alert('⚠️ Error: QR code may not have been saved. Please check console and try again.');
+      }
+    } catch (err) {
+      console.error('Error saving QR code:', err);
+      const errorMessage = err instanceof Error ? err.message : 'Failed to save QR code';
+      alert(`❌ Error: ${errorMessage}\n\nPlease check:\n1. Backend server is running\n2. You are logged in\n3. Network connection is stable`);
+    } finally {
+      setSavingQrCode(false);
+    }
+  };
+
+  const handleSaveAccount = async () => {
+    try {
+      // Validate password fields if changing password
+      if (accountSettings.new_password) {
+        if (accountSettings.new_password !== accountSettings.confirm_password) {
+          alert('New password and confirm password do not match');
+          return;
+        }
+
+        if (accountSettings.new_password.length < 6) {
+          alert('New password must be at least 6 characters');
+          return;
+        }
+
+        if (!accountSettings.current_password) {
+          alert('Current password is required to change password');
+          return;
+        }
       }
 
       setSaving(true);
-      // TODO: Save to backend API
-      // await apiClient.updateAccountSettings(accountSettings);
+      
+      // Prepare request data
+      const updateData: {
+        owner_name: string;
+        owner_email: string;
+        current_password?: string;
+        new_password?: string;
+        two_factor_enabled: boolean;
+      } = {
+        owner_name: accountSettings.owner_name,
+        owner_email: accountSettings.owner_email,
+        two_factor_enabled: accountSettings.two_factor_enabled,
+      };
+
+      // Only include password fields if changing password
+      if (accountSettings.new_password) {
+        updateData.current_password = accountSettings.current_password;
+        updateData.new_password = accountSettings.new_password;
+      }
+
+      // Call backend API
+      await apiClient.updateAccountSettings(updateData);
+      
       alert('✅ Account settings saved successfully!');
+      
+      // Clear password fields
       setAccountSettings(prev => ({
         ...prev,
         current_password: '',
         new_password: '',
         confirm_password: ''
       }));
-    } catch (err) {
-      alert('Failed to save account settings');
+    } catch (err: any) {
+      const errorMessage = err?.message || 'Failed to save account settings';
+      alert(`❌ ${errorMessage}`);
+      console.error('Error saving account settings:', err);
     } finally {
       setSaving(false);
     }
@@ -501,11 +786,22 @@ export default function SettingsPage() {
   const handleSaveOrderSettings = async () => {
     try {
       setSaving(true);
-      // TODO: Save to backend API
-      // await apiClient.updateOrderSettings(orderSettings);
-      alert('✅ Order settings saved successfully!');
+      
+      // Save to backend API
+      await apiClient.updateOrderSettings({
+        delivery_available: orderSettings.delivery_available,
+        auto_accept_orders: orderSettings.auto_accept_orders,
+        default_preparation_time: orderSettings.default_preparation_time,
+        minimum_order_value: orderSettings.minimum_order_value,
+        maximum_order_value: orderSettings.maximum_order_value || undefined,
+        allow_order_modifications: orderSettings.allow_order_modifications,
+        cancellation_policy: orderSettings.cancellation_policy || undefined,
+      });
+      
+      alert('✅ Order settings saved successfully to database!');
     } catch (err) {
-      alert('Failed to save order settings');
+      console.error('Failed to save order settings:', err);
+      alert('Failed to save order settings: ' + (err instanceof Error ? err.message : 'Unknown error'));
     } finally {
       setSaving(false);
     }
@@ -530,12 +826,23 @@ export default function SettingsPage() {
     }
   };
 
+  // Show loading spinner with timeout message
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
           <p className="mt-4 text-gray-600">Loading settings...</p>
+          <p className="mt-2 text-sm text-gray-500">If this takes too long, check if the backend server is running</p>
+          <button
+            onClick={() => {
+              setLoading(false);
+              alert('Loading cancelled. Page will load with limited functionality.');
+            }}
+            className="mt-4 px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors"
+          >
+            Cancel Loading
+          </button>
         </div>
       </div>
     );
@@ -570,6 +877,7 @@ export default function SettingsPage() {
               {[
                 { id: 'notifications', name: '🔔 Notifications', icon: '🔔' },
                 { id: 'subscription', name: '💳 Subscription', icon: '💳' },
+                { id: 'payments', name: '💵 Payments', icon: '💵' },
                 { id: 'profile', name: '🏪 Profile', icon: '🏪' },
                 { id: 'account', name: '👤 Account', icon: '👤' },
                 { id: 'orders', name: '📦 Orders', icon: '📦' },
@@ -639,9 +947,10 @@ export default function SettingsPage() {
                     
                     <button
                       onClick={handleTestNotification}
-                      className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm font-medium"
+                      disabled={saving}
+                      className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      📱 Send Test Notification
+                      {saving ? '⏳ Sending...' : '📱 Send Test Notification'}
                     </button>
                   </div>
                 )}
@@ -1003,6 +1312,266 @@ export default function SettingsPage() {
                     Cancel Auto-Renewal
                   </button>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* Payments Tab */}
+          {activeTab === 'payments' && (
+            <div className="space-y-6">
+              <div>
+                <h2 className="text-xl font-bold text-gray-900 mb-2">Payment Settings</h2>
+                <p className="text-gray-600">Manage your UPI payment methods and QR codes</p>
+              </div>
+
+              {/* UPI ID Management */}
+              <div className="border border-gray-200 rounded-lg p-6">
+                <h3 className="text-lg font-semibold text-gray-900 mb-4">💳 UPI ID Configuration</h3>
+                <p className="text-sm text-gray-600 mb-4">
+                  Set up your UPI ID for receiving payments from customers. This will be used for payment links and QR code generation.
+                </p>
+                
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      UPI ID *
+                    </label>
+                    <input
+                      type="text"
+                      value={restaurantInfo?.upi_id || ''}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        setRestaurantInfo(prev => prev ? { ...prev, upi_id: value } : prev);
+                      }}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg font-mono text-sm"
+                      placeholder="restaurant@paytm / 1234567890@upi"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      {restaurantInfo?.upi_id 
+                        ? `Current UPI ID: ${restaurantInfo.upi_id}` 
+                        : 'Enter your UPI ID above (e.g., restaurant@paytm or 1234567890@upi).'}
+                    </p>
+                  </div>
+
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          const upiId = restaurantInfo?.upi_id?.trim() || '';
+                          if (!upiId) {
+                            alert('Please enter a valid UPI ID before saving.');
+                            return;
+                          }
+
+                          // Basic front-end validation
+                          if (!upiId.includes('@')) {
+                            alert('Invalid UPI ID. It should look like restaurant@paytm or 1234567890@upi');
+                            return;
+                          }
+
+                          const updated = await apiClient.updateUPIID(upiId);
+                          setRestaurantInfo(updated);
+                          alert(`✅ UPI ID saved successfully: ${updated.upi_id}`);
+                        } catch (err) {
+                          console.error('Failed to update UPI ID:', err);
+                          const message = err instanceof Error ? err.message : 'Unknown error';
+                          alert(`❌ Failed to update UPI ID: ${message}`);
+                        }
+                      }}
+                      className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium"
+                    >
+                      Save UPI ID
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* UPI QR Code Management */}
+              <div className="border border-gray-200 rounded-lg p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold text-gray-900">📱 UPI QR Code</h3>
+                  <button
+                    onClick={async () => {
+                      try {
+                        // Add timeout
+                        const timeoutPromise = new Promise((_, reject) => 
+                          setTimeout(() => reject(new Error('Request timeout - backend may not be responding')), 8000)
+                        );
+                        
+                        const infoPromise = apiClient.getRestaurantInfo();
+                        const info = await Promise.race([infoPromise, timeoutPromise]) as any;
+                        
+                        setRestaurantInfo(info);
+                        if (info.upi_qr_code && info.upi_qr_code.trim().length > 0) {
+                          setUpiQrCode(info.upi_qr_code);
+                          alert('✅ QR code refreshed from database!');
+                        } else {
+                          setUpiQrCode('');
+                          alert('ℹ️ No QR code found in database');
+                        }
+                      } catch (err) {
+                        const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+                        console.error('Failed to refresh QR code:', err);
+                        
+                        // Check if it's a network error
+                        if (errorMessage.includes('Failed to fetch') || errorMessage.includes('Network error') || errorMessage.includes('timeout')) {
+                          alert('⚠️ Cannot connect to backend server.\n\nPlease ensure:\n1. Backend is running on port 4000\n2. Backend is accessible\n3. No firewall blocking the connection\n\nCurrent QR code will remain displayed if available.');
+                        } else {
+                          alert('⚠️ Failed to refresh QR code: ' + errorMessage);
+                        }
+                      }
+                    }}
+                    className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                    title="Refresh QR code from database"
+                  >
+                    🔄 Refresh
+                  </button>
+                </div>
+                <p className="text-sm text-gray-600 mb-4">
+                  Upload your UPI QR code image or generate one from your UPI ID. This QR code will be displayed when customers click the UPI button on the dashboard.
+                </p>
+                
+                <div className="space-y-4">
+                  {/* Current QR Code Display */}
+                  {upiQrCode ? (
+                    <div className="flex flex-col items-center p-6 bg-gradient-to-br from-blue-50 to-indigo-50 rounded-lg border-2 border-dashed border-blue-300">
+                      <div className="bg-white p-4 rounded-lg shadow-lg cursor-pointer hover:shadow-xl transition-shadow" onClick={() => setShowQrCodeModal(true)}>
+                        <img 
+                          src={upiQrCode} 
+                          alt="UPI QR Code" 
+                          className="w-[500px] h-[500px] object-contain mb-3"
+                          onError={(e) => {
+                            console.error('Error loading QR code image');
+                            const target = e.currentTarget;
+                            target.style.display = 'none';
+                            // Show error message
+                            const parent = target.parentElement;
+                            if (parent) {
+                              parent.innerHTML = '<p class="text-red-600 text-sm">Error loading QR code image. Please try uploading again.</p>';
+                            }
+                          }}
+                          onLoad={() => {
+                            console.log('QR code image loaded successfully');
+                          }}
+                        />
+                      </div>
+                      <p className="text-sm font-semibold text-gray-700 mt-2">Current QR Code</p>
+                      <p className="text-xs text-gray-500 mt-1">Click to view larger</p>
+                      {restaurantInfo?.upi_id && (
+                        <p className="text-xs text-gray-500 mt-1">UPI ID: {restaurantInfo.upi_id}</p>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center p-8 bg-gray-50 rounded-lg border-2 border-dashed border-gray-300">
+                      <svg className="w-24 h-24 text-gray-400 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
+                      </svg>
+                      <p className="text-gray-600 font-medium">No QR Code Set</p>
+                      <p className="text-xs text-gray-500 mt-1">Upload or generate a QR code below</p>
+                    </div>
+                  )}
+
+                  {/* Upload QR Code */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      📤 Upload QR Code Image
+                    </label>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={handleQrCodeFileChange}
+                        className="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                    </div>
+                    <p className="text-xs text-gray-500 mt-1">Supported formats: PNG, JPG, JPEG (Max 5MB)</p>
+                  </div>
+
+                  {/* Generate QR Code */}
+                  {restaurantInfo?.upi_id ? (
+                    <div>
+                      <button
+                        type="button"
+                        onClick={handleGenerateQrCode}
+                        className="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium flex items-center justify-center gap-2"
+                      >
+                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
+                        </svg>
+                        Generate QR Code from UPI ID
+                      </button>
+                      <p className="text-xs text-gray-500 mt-1 text-center">Current UPI ID: <span className="font-mono font-semibold">{restaurantInfo.upi_id}</span></p>
+                    </div>
+                  ) : (
+                    <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                      <p className="text-sm text-yellow-900">
+                        ⚠️ <strong>UPI ID Required:</strong> Please set up your UPI ID first using the "UPI" button on the Dashboard before generating a QR code.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Save Button */}
+                  <div className="pt-4 border-t">
+                    <button
+                      type="button"
+                      onClick={handleSaveQrCode}
+                      disabled={savingQrCode || !upiQrCode}
+                      className="w-full px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors font-semibold disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    >
+                      {savingQrCode ? (
+                        <>
+                          <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                          </svg>
+                          Saving...
+                        </>
+                      ) : (
+                        <>
+                          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                          Save QR Code
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Payment Verification Info */}
+              <div className="border border-gray-200 rounded-lg p-6 bg-gradient-to-br from-green-50 to-blue-50">
+                <h3 className="text-lg font-semibold text-gray-900 mb-4">✅ Payment Verification</h3>
+                <div className="space-y-3">
+                  <div className="flex items-start gap-3">
+                    <span className="text-xl">💡</span>
+                    <div>
+                      <p className="text-sm font-medium text-gray-900">How it works:</p>
+                      <p className="text-xs text-gray-600 mt-1">
+                        When customers make UPI payments, you can verify them on the Dashboard by entering the customer's UPI name from the payment notification.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <span className="text-xl">📱</span>
+                    <div>
+                      <p className="text-sm font-medium text-gray-900">QR Code Display:</p>
+                      <p className="text-xs text-gray-600 mt-1">
+                        The saved QR code will be displayed when customers click the "UPI" button on your Dashboard. They can scan it to make payments directly.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <span className="text-xl">🔒</span>
+                    <div>
+                      <p className="text-sm font-medium text-gray-900">Security:</p>
+                      <p className="text-xs text-gray-600 mt-1">
+                        Your UPI ID and QR code are securely stored and only accessible to authenticated restaurant owners.
+                      </p>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -1389,6 +1958,24 @@ export default function SettingsPage() {
               <div className="border border-gray-200 rounded-lg p-6">
                 <h3 className="text-lg font-semibold text-gray-900 mb-4">Order Processing</h3>
                 <div className="space-y-4">
+                  <label className="flex items-center justify-between p-3 hover:bg-gray-50 rounded-lg cursor-pointer">
+                    <div className="flex items-center gap-3">
+                      <span className="text-xl">🚚</span>
+                      <div>
+                        <span className="text-sm font-medium text-gray-700">Delivery Available</span>
+                        <p className="text-xs text-gray-500">Allow customers to place delivery orders</p>
+                      </div>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={orderSettings.delivery_available}
+                        onChange={(e) => setOrderSettings(prev => ({ ...prev, delivery_available: e.target.checked }))}
+                        className="sr-only peer"
+                      />
+                      <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                    </label>
+                  </label>
                   <label className="flex items-center justify-between p-3 hover:bg-gray-50 rounded-lg cursor-pointer">
                     <div className="flex items-center gap-3">
                       <span className="text-xl">✅</span>
@@ -2118,6 +2705,40 @@ export default function SettingsPage() {
                   </table>
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* QR Code Modal */}
+      {showQrCodeModal && upiQrCode && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4" onClick={() => setShowQrCodeModal(false)}>
+          <div className="bg-white rounded-lg p-6 w-[600px] max-w-full relative" onClick={(e) => e.stopPropagation()}>
+            <button
+              onClick={() => setShowQrCodeModal(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 text-3xl font-bold z-10 w-8 h-8 flex items-center justify-center"
+            >
+              ×
+            </button>
+            <h3 className="text-xl font-bold text-gray-900 mb-4 text-center">UPI QR Code</h3>
+            <div className="flex flex-col items-center">
+              <div className="bg-white p-4 rounded-lg shadow-xl">
+                <img 
+                  src={upiQrCode} 
+                  alt="UPI QR Code" 
+                  className="w-[550px] h-[550px] object-contain"
+                  style={{ minWidth: '550px', minHeight: '550px' }}
+                  onError={(e) => {
+                    console.error('Error loading QR code image');
+                    const target = e.currentTarget;
+                    target.style.display = 'none';
+                  }}
+                />
+              </div>
+              {restaurantInfo?.upi_id && (
+                <p className="text-sm text-gray-600 mt-4">UPI ID: <span className="font-semibold">{restaurantInfo.upi_id}</span></p>
+              )}
+              <p className="text-xs text-gray-500 mt-2">Scan this QR code to make payment</p>
             </div>
           </div>
         </div>

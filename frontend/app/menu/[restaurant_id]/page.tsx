@@ -22,8 +22,11 @@ interface Restaurant {
   id: string;
   name: string;
   address: string;
+  latitude?: number;
+  longitude?: number;
   delivery_fee: number;
   upi_id: string;
+  delivery_available?: boolean;
 }
 
 interface MenuData {
@@ -67,6 +70,12 @@ export default function MenuPage() {
   const [customerLat, setCustomerLat] = useState<number | null>(null);
   const [customerLon, setCustomerLon] = useState<number | null>(null);
   const [locationName, setLocationName] = useState<string>(''); // Location name (e.g., "Lucknow")
+  const [showLocationModal, setShowLocationModal] = useState(false); // Show location modal
+  const [distance, setDistance] = useState<number | null>(null); // Distance to restaurant in km
+  const [showMapModal, setShowMapModal] = useState(false); // Show map modal
+  const [showPickupConfirm, setShowPickupConfirm] = useState(false); // Show pickup location confirmation
+  const [showLocationModal, setShowLocationModal] = useState(false); // Show location modal
+  const [distance, setDistance] = useState<number | null>(null); // Distance to restaurant in km
 
   useEffect(() => {
     if (restaurantId) {
@@ -232,6 +241,17 @@ export default function MenuPage() {
       }
       
       setMenuData(data);
+      
+      // Calculate distance if we have customer and restaurant coordinates
+      if (data.restaurant.latitude && data.restaurant.longitude && customerLat && customerLon) {
+        const dist = calculateDistance(
+          customerLat,
+          customerLon,
+          data.restaurant.latitude,
+          data.restaurant.longitude
+        );
+        setDistance(dist);
+      }
     } catch (err) {
       let errorMessage = 'Failed to load menu. Please try again.';
       const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
@@ -247,6 +267,30 @@ export default function MenuPage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  // Calculate distance between two coordinates (Haversine formula)
+  const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+    const R = 6371; // Earth's radius in km
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = 
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c; // Distance in km
+  };
+
+  // Get Google Maps link
+  const getGoogleMapsLink = (): string => {
+    if (menuData?.restaurant.latitude && menuData?.restaurant.longitude) {
+      return `https://www.google.com/maps?q=${menuData.restaurant.latitude},${menuData.restaurant.longitude}`;
+    } else if (menuData?.restaurant.address) {
+      const encodedAddress = encodeURIComponent(menuData.restaurant.address);
+      return `https://www.google.com/maps/search/?api=1&query=${encodedAddress}`;
+    }
+    return '';
   };
 
   const addToCart = (item: MenuItem) => {
@@ -296,6 +340,12 @@ export default function MenuPage() {
 
     if (orderType === 'delivery' && !deliveryAddress.trim()) {
       alert('Please enter delivery address');
+      return;
+    }
+
+    // For pickup orders, check if location is confirmed
+    if (orderType === 'pickup' && !pickupLocationConfirmed) {
+      alert('Please confirm that you can reach the restaurant location to pick up your order.');
       return;
     }
 
@@ -370,7 +420,22 @@ export default function MenuPage() {
       if (paymentMethod === 'cod') {
         alert(`✅ Order placed successfully!\n\nOrder ID: ${order.id}\nTotal: ₹${order.total_amount}\nPayment: Cash on Delivery\n\nYou will receive WhatsApp notifications about your order status.`);
       } else {
-        alert(`✅ Order received!\n\nOrder ID: ${order.id}\nTotal: ₹${order.total_amount}\nPayment: Online Payment\n\nCheck your WhatsApp for the payment link. Complete payment to confirm your order.`);
+        // For online payment, show payment link and redirect to payment page
+        if (order.payment_link) {
+          // Store order info for payment page
+          sessionStorage.setItem('pendingOrder', JSON.stringify({
+            orderId: order.id,
+            totalAmount: order.total_amount || order.total,
+            paymentLink: order.payment_link,
+            customerName: order.customer_name,
+            restaurantId: order.restaurant_id,
+            razorpay_payment_link_id: order.razorpay_payment_link_id
+          }));
+          // Redirect to payment page
+          window.location.href = `/payment?order_id=${order.id}`;
+        } else {
+          alert(`✅ Order received!\n\nOrder ID: ${order.id}\nTotal: ₹${order.total_amount || order.total}\nPayment: Online Payment\n\nCheck your WhatsApp for the payment link. Complete payment to confirm your order.`);
+        }
       }
       
       // Reset cart
@@ -453,6 +518,18 @@ export default function MenuPage() {
                     </svg>
                     {locationName}
                   </span>
+                )}
+                {menuData?.restaurant.address && (
+                  <button
+                    onClick={() => setShowLocationModal(true)}
+                    className="flex items-center gap-1 bg-white/20 hover:bg-white/30 backdrop-blur-md px-3 py-1 rounded-lg transition-all duration-300 border border-white/20"
+                    title="View restaurant location"
+                  >
+                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M5.05 4.05a7 7 0 119.9 9.9L10 18.9l-4.95-4.95a7 7 0 010-9.9zM10 11a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
+                    </svg>
+                    {distance !== null ? `${distance.toFixed(1)} km away` : 'View Location'}
+                  </button>
                 )}
               </div>
             </div>
@@ -731,9 +808,48 @@ export default function MenuPage() {
                       required
                     >
                       <option value="pickup">🏃 Pickup</option>
-                      <option value="delivery">🚚 Delivery</option>
+                      {menuData?.restaurant.delivery_available !== false && (
+                        <option value="delivery">🚚 Delivery</option>
+                      )}
                     </select>
+                    {menuData?.restaurant.delivery_available === false && (
+                      <p className="text-xs text-gray-500 mt-1">ℹ️ Delivery is currently unavailable. Only pickup orders are accepted.</p>
+                    )}
                   </div>
+
+                  {orderType === 'pickup' && menuData?.restaurant && (
+                    <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-4">
+                      <div className="flex items-start gap-3">
+                        <div className="bg-blue-100 rounded-full p-2">
+                          <svg className="w-5 h-5 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M5.05 4.05a7 7 0 119.9 9.9L10 18.9l-4.95-4.95a7 7 0 010-9.9zM10 11a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
+                          </svg>
+                        </div>
+                        <div className="flex-1">
+                          <p className="font-bold text-gray-800 mb-1">📍 Pickup Location</p>
+                          <p className="text-sm text-gray-700 mb-2">{menuData.restaurant.address}</p>
+                          {distance !== null && (
+                            <p className="text-sm text-blue-600 font-semibold mb-2">
+                              📏 {distance.toFixed(1)} km away from your location
+                            </p>
+                          )}
+                          {getGoogleMapsLink() && (
+                            <a
+                              href={getGoogleMapsLink()}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold text-sm hover:bg-blue-700 transition-colors"
+                            >
+                              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                                <path fillRule="evenodd" d="M5.05 4.05a7 7 0 119.9 9.9L10 18.9l-4.95-4.95a7 7 0 010-9.9zM10 11a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
+                              </svg>
+                              Open in Google Maps
+                            </a>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {orderType === 'delivery' && (
                     <div>
@@ -862,6 +978,63 @@ export default function MenuPage() {
             animation: fadeIn 0.3s ease-out;
           }
         `}</style>
+
+        {/* Location Modal */}
+        {showLocationModal && menuData?.restaurant && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fadeIn">
+            <div className="bg-white rounded-3xl max-w-md w-full shadow-2xl border border-gray-100">
+              <div className="bg-gradient-to-r from-purple-600 to-indigo-600 text-white p-6 rounded-t-3xl">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-2xl font-bold flex items-center gap-2">
+                    <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M5.05 4.05a7 7 0 119.9 9.9L10 18.9l-4.95-4.95a7 7 0 010-9.9zM10 11a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
+                    </svg>
+                    Restaurant Location
+                  </h2>
+                  <button
+                    onClick={() => setShowLocationModal(false)}
+                    className="bg-white/20 hover:bg-white/30 rounded-full p-2 transition-colors"
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-6">
+                <div className="mb-4">
+                  <p className="font-bold text-gray-800 text-lg mb-2">{menuData.restaurant.name}</p>
+                  <p className="text-gray-700">{menuData.restaurant.address}</p>
+                </div>
+
+                {distance !== null && customerLat && customerLon && (
+                  <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-4">
+                    <p className="text-sm text-gray-600 mb-1">Distance from your location:</p>
+                    <p className="text-2xl font-bold text-blue-600">{distance.toFixed(1)} km</p>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Estimated travel time: ~{Math.round(distance * 2)} minutes
+                    </p>
+                  </div>
+                )}
+
+                {getGoogleMapsLink() && (
+                  <a
+                    href={getGoogleMapsLink()}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="w-full bg-gradient-to-r from-blue-600 to-blue-700 text-white py-3 px-6 rounded-xl font-bold hover:from-blue-700 hover:to-blue-800 transition-all duration-300 flex items-center justify-center gap-2 shadow-lg hover:shadow-xl"
+                  >
+                    <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M5.05 4.05a7 7 0 119.9 9.9L10 18.9l-4.95-4.95a7 7 0 010-9.9zM10 11a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
+                    </svg>
+                    Open in Google Maps
+                  </a>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
