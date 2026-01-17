@@ -9,7 +9,7 @@ from fastapi import FastAPI, Form, Request, HTTPException, Query
 from fastapi.responses import PlainTextResponse, Response, HTMLResponse
 from twilio.twiml.messaging_response import MessagingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from routers import auth, dashboard, menu, orders, webhook
+from routers import auth, dashboard, menu, orders, webhook, settings, notifications, payments, delivery
 from typing import Optional
 from datetime import datetime, timedelta
 from repositories.session_repo import get_session, get_session_by_phone, create_session, update_session
@@ -21,7 +21,6 @@ from models.customer import Customer
 from models.order import Order, OrderItem
 from services.order_service import create_new_order
 from services.whatsapp_service import send_order_status_notification
-import uuid
 import urllib.parse
 
 # Twilio credentials (HARDCODED)
@@ -45,7 +44,12 @@ app = FastAPI(
 # Configure CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific frontend URL
+    allow_origins=[
+        "http://localhost:3000",  # Next.js default port
+        "http://localhost:3001",  # Alternative port
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -57,6 +61,10 @@ app.include_router(dashboard.router)
 app.include_router(menu.router)
 app.include_router(orders.router)
 app.include_router(webhook.router)
+app.include_router(settings.router)
+app.include_router(notifications.router)
+app.include_router(payments.router)
+app.include_router(delivery.router)
 
 @app.get("/")
 async def root():
@@ -747,100 +755,105 @@ async def whatsapp_reply(
 # Public API endpoint to get filtered restaurants (for restaurant selection page)
 @app.get("/api/public/restaurants")
 async def get_filtered_restaurants(
-    latitude: float = Query(...),
-    longitude: float = Query(...),
-    max_distance: float = Query(50.0, description="Maximum distance in km"),
-    cuisine_type: Optional[str] = Query(None, description="Filter by cuisine: veg, non-veg, both, snack, full-meal")
+    latitude: Optional[float] = Query(None, description="User's latitude"),
+    longitude: Optional[float] = Query(None, description="User's longitude"),
+    max_distance: Optional[float] = Query(None, description="Maximum distance in km"),
+    cuisine_type: Optional[str] = Query(None, description="Filter by cuisine type")
 ):
     """Public endpoint to get restaurants filtered by location, distance, and cuisine type"""
-    logger.info(f"📋 Fetching restaurants - lat={latitude}, lon={longitude}, max_dist={max_distance}, cuisine={cuisine_type}")
-    
-    # Find nearby restaurants
-    nearby_restaurants = find_restaurants_by_location(latitude, longitude, radius_km=max_distance)
-    
-    # Filter by cuisine type if specified
-    if cuisine_type and cuisine_type.lower() != "all":
-        filtered_restaurants = []
-        filter_cuisine = cuisine_type.lower()
+    try:
+        logger.info(f"📋 Fetching restaurants - lat={latitude}, lon={longitude}, max_dist={max_distance}, cuisine={cuisine_type}")
         
+        # Find nearby restaurants - if location provided, use it; otherwise get all restaurants
+        if latitude is not None and longitude is not None:
+            radius_km = max_distance if max_distance is not None else 50.0
+            nearby_restaurants = find_restaurants_by_location(latitude, longitude, radius_km=radius_km)
+        else:
+            # If no location provided, get all restaurants
+            from repositories.restaurant_repo import get_all_restaurants
+            all_restaurants = get_all_restaurants()
+            nearby_restaurants = [{'restaurant': r, 'distance': 0.0, 'rating': 4.0} for r in all_restaurants]
+        
+        # Filter by cuisine type if specified
+        if cuisine_type and cuisine_type.lower() != "all":
+            filtered_restaurants = []
+            filter_cuisine = cuisine_type.lower()
+            
+            for item in nearby_restaurants:
+                restaurant = item['restaurant']
+                # Get restaurant cuisine type (default to "both" if not set)
+                restaurant_cuisine = getattr(restaurant, 'cuisine_type', 'both').lower()
+                
+                # Match logic
+                should_include = False
+                
+                if filter_cuisine == "veg":
+                    # Veg filter: show restaurants that serve veg (veg, both, full-meal)
+                    should_include = restaurant_cuisine in ["veg", "both", "full-meal"]
+                elif filter_cuisine == "non-veg":
+                    # Non-veg filter: show restaurants that serve non-veg (non-veg, both, full-meal)
+                    should_include = restaurant_cuisine in ["non-veg", "both", "full-meal"]
+                elif filter_cuisine == "snack":
+                    # Snack filter: show only snack restaurants
+                    should_include = restaurant_cuisine == "snack"
+                elif filter_cuisine == "full-meal":
+                    # Full meal filter: show full-meal restaurants
+                    should_include = restaurant_cuisine == "full-meal"
+                elif filter_cuisine == "both":
+                    # Both filter: show restaurants that serve both
+                    should_include = restaurant_cuisine in ["both", "full-meal"]
+                else:
+                    # Exact match for any other cuisine type
+                    should_include = restaurant_cuisine == filter_cuisine
+                
+                if should_include:
+                    filtered_restaurants.append(item)
+            
+            nearby_restaurants = filtered_restaurants
+        
+        # Get settings for delivery_available and minimum_order_value
+        from repositories.settings_repo import get_settings_by_restaurant_id
+        
+        # Format response according to spec
+        restaurants_list = []
         for item in nearby_restaurants:
             restaurant = item['restaurant']
-            # Get restaurant cuisine type (default to "both" if not set)
-            restaurant_cuisine = getattr(restaurant, 'cuisine_type', 'both').lower()
+            # Get rating information from the item (already calculated in find_restaurants_by_location)
+            rating = item.get('rating', 4.0)  # Overall rating (1-5)
             
-            # Match logic
-            should_include = False
+            # Get settings
+            settings = get_settings_by_restaurant_id(restaurant.id)
+            delivery_available = getattr(settings, 'delivery_available', True) if settings else True
+            minimum_order_value = float(getattr(settings, 'minimum_order_value', 0.0)) if settings else 0.0
             
-            if filter_cuisine == "veg":
-                # Veg filter: show restaurants that serve veg (veg, both, full-meal)
-                should_include = restaurant_cuisine in ["veg", "both", "full-meal"]
-            elif filter_cuisine == "non-veg":
-                # Non-veg filter: show restaurants that serve non-veg (non-veg, both, full-meal)
-                should_include = restaurant_cuisine in ["non-veg", "both", "full-meal"]
-            elif filter_cuisine == "snack":
-                # Snack filter: show only snack restaurants
-                should_include = restaurant_cuisine == "snack"
-            elif filter_cuisine == "full-meal":
-                # Full meal filter: show full-meal restaurants
-                should_include = restaurant_cuisine == "full-meal"
-            elif filter_cuisine == "both":
-                # Both filter: show restaurants that serve both
-                should_include = restaurant_cuisine in ["both", "full-meal"]
-            else:
-                # Exact match for any other cuisine type
-                should_include = restaurant_cuisine == filter_cuisine
-            
-            if should_include:
-                filtered_restaurants.append(item)
+            restaurants_list.append({
+                "id": restaurant.id,
+                "name": restaurant.name,
+                "phone": restaurant.phone,
+                "address": restaurant.address or "",
+                "latitude": float(restaurant.latitude) if restaurant.latitude else None,
+                "longitude": float(restaurant.longitude) if restaurant.longitude else None,
+                "is_active": restaurant.is_active,
+                "rating": rating,
+                "image_url": None,  # Can be added later if image support is implemented
+                "cuisine_type": getattr(restaurant, 'cuisine_type', None),
+                "delivery_available": delivery_available,
+                "minimum_order_value": minimum_order_value
+            })
         
-        nearby_restaurants = filtered_restaurants
-    
-    # Format response with ratings
-    restaurants_list = []
-    for idx, item in enumerate(nearby_restaurants, 1):
-        restaurant = item['restaurant']
-        # Get rating information from the item (already calculated in find_restaurants_by_location)
-        rating_info = {
-            'rating': item.get('rating', 4.0),  # Overall rating (1-5)
-            'customer_rating': item.get('customer_rating'),  # Average customer rating
-            'total_orders': item.get('total_orders', 0)  # Total orders count
+        return {
+            "restaurants": restaurants_list,
+            "total": len(restaurants_list),
+            "filters": {
+                "latitude": latitude,
+                "longitude": longitude,
+                "max_distance": max_distance,
+                "cuisine_type": cuisine_type or "all"
+            }
         }
-        
-        # Check if restaurant has any discounted items
-        menu_items = get_products_by_restaurant(restaurant.id)
-        has_discount = any(item.discounted_price and item.discounted_price < item.price for item in menu_items)
-        max_discount_percentage = 0
-        if has_discount:
-            for item in menu_items:
-                if item.discounted_price and item.discounted_price < item.price:
-                    discount_pct = ((item.price - item.discounted_price) / item.price) * 100
-                    max_discount_percentage = max(max_discount_percentage, round(discount_pct, 1))
-        
-        restaurants_list.append({
-            "id": restaurant.id,
-            "name": restaurant.name,
-            "address": restaurant.address,
-            "distance": round(item['distance'], 1),
-            "delivery_fee": restaurant.delivery_fee,
-            "cuisine_type": getattr(restaurant, 'cuisine_type', 'both'),
-            "serial": idx,
-            "rating": rating_info['rating'],
-            "customer_rating": rating_info['customer_rating'],
-            "total_orders": rating_info['total_orders'],
-            "has_discount": has_discount,
-            "max_discount_percentage": max_discount_percentage if has_discount else None
-        })
-    
-    return {
-        "restaurants": restaurants_list,
-        "total": len(restaurants_list),
-        "filters": {
-            "latitude": latitude,
-            "longitude": longitude,
-            "max_distance": max_distance,
-            "cuisine_type": cuisine_type or "all"
-        }
-    }
+    except Exception as e:
+        logger.error(f"❌ Error fetching restaurants: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to fetch restaurants: {str(e)}")
 
 # Public API endpoint for frontend to fetch menu (no auth required)
 @app.get("/api/public/menu/{restaurant_id}")
@@ -854,51 +867,39 @@ async def get_public_menu(restaurant_id: str):
         logger.warning(f"❌ Restaurant not found: {restaurant_id}")
         raise HTTPException(status_code=404, detail="Restaurant not found")
     
+    # Get restaurant settings to check delivery availability
+    from repositories.settings_repo import get_settings_by_restaurant_id
+    try:
+        settings = get_settings_by_restaurant_id(restaurant_id)
+        delivery_available = getattr(settings, 'delivery_available', True) if settings else True
+    except Exception as e:
+        logger.warning(f"Error fetching settings for restaurant {restaurant_id}: {e}")
+        delivery_available = True  # Default to True on error
+    
     menu_items = get_products_by_restaurant(restaurant_id)
     
-    # Group items by category - include all items (available and unavailable)
-    categories = {}
+    # Format menu items according to spec
+    menu = []
     for item in menu_items:
-        category = item.category or "Other"
-        if category not in categories:
-            categories[category] = []
-        # Calculate discount percentage
-        discount_percentage = None
-        if item.discounted_price and item.discounted_price < item.price:
-            discount_percentage = round(((item.price - item.discounted_price) / item.price) * 100, 1)
-        
-        categories[category].append({
+        menu.append({
             "id": item.id,
             "name": item.name,
-            "description": item.description,
+            "description": getattr(item, 'description', None),
             "price": item.price,
-            "discounted_price": item.discounted_price,
-            "discount_percentage": discount_percentage,
-            "is_available": item.is_available
+            "category": item.category or "Other",
+            "image_url": getattr(item, 'image_url', None),
+            "is_available": item.is_available,
+            "preparation_time": getattr(item, 'preparation_time', None)
         })
-    
-    # Sort items within each category: available first, then unavailable
-    for category in categories:
-        categories[category].sort(key=lambda x: (not x["is_available"], x["name"]))
-    
-    # Convert to list format
-    category_list = [
-        {
-            "name": category,
-            "items": items
-        }
-        for category, items in categories.items()
-    ]
     
     return {
         "restaurant": {
             "id": restaurant.id,
             "name": restaurant.name,
-            "address": restaurant.address,
-            "delivery_fee": restaurant.delivery_fee,
-            "upi_id": restaurant.upi_id
+            "phone": restaurant.phone,
+            "address": restaurant.address or ""
         },
-        "categories": category_list
+        "menu": menu
     }
 
 # Temporary storage for QR code scans (stores most recent restaurant_id)
@@ -1575,9 +1576,9 @@ async def submit_order(request: Request):
     customer_phone = token
     customer = get_customer_by_phone(customer_phone)
     if not customer:
-        customer_id = str(uuid.uuid4().int % 1000000)
+        # ID will be auto-generated by repository
         customer = create_customer(Customer(
-            id=customer_id,
+            id="",  # Will be auto-generated
             restaurant_id=restaurant_id,
             phone=customer_phone,
             latitude=0.0,

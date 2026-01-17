@@ -1,81 +1,155 @@
 """
 Session Repository - Data access layer for customer sessions
-Later: Replace with SQLAlchemy queries or Redis
+Now using SQLAlchemy with PostgreSQL database
 """
 from typing import Optional
 from models.session import CustomerSession
-from data.sessions_data import CUSTOMER_SESSIONS
+from database import SessionLocal
+from models_db import CustomerSessionDB
+from model_converters import session_db_to_model, session_model_to_db
+
 
 def get_session(phone_number: str, restaurant_id: str) -> Optional[CustomerSession]:
     """
-    Get customer session
-    Later: SELECT * FROM sessions WHERE phone_number = ? AND restaurant_id = ?
-    Or: Redis GET session:{phone}:{restaurant_id}
+    Get customer session from database
     """
-    key = f"{phone_number}:{restaurant_id}"
-    return CUSTOMER_SESSIONS.get(key)
+    db = SessionLocal()
+    try:
+        # Use None handling for restaurant_id
+        if restaurant_id and restaurant_id != "none":
+            db_session = db.query(CustomerSessionDB).filter(
+                CustomerSessionDB.phone_number == phone_number,
+                CustomerSessionDB.restaurant_id == restaurant_id
+            ).first()
+        else:
+            db_session = db.query(CustomerSessionDB).filter(
+                CustomerSessionDB.phone_number == phone_number,
+                CustomerSessionDB.restaurant_id.is_(None)
+            ).first()
+        
+        if db_session:
+            return session_db_to_model(db_session)
+        return None
+    finally:
+        db.close()
+
 
 def get_session_by_phone(phone_number: str) -> Optional[CustomerSession]:
     """
     Get customer session by phone number only (for initial lookup)
     Returns the first session found for this phone number
     """
-    # Try with "none" first (for sessions before restaurant selection)
-    session = get_session(phone_number, "none")
-    if session:
-        return session
-    
-    # If not found, search all sessions for this phone number
-    for key, sess in CUSTOMER_SESSIONS.items():
-        if sess.phone_number == phone_number:
-            return sess
-    
-    return None
+    db = SessionLocal()
+    try:
+        # Try with None restaurant_id first (for sessions before restaurant selection)
+        db_session = db.query(CustomerSessionDB).filter(
+            CustomerSessionDB.phone_number == phone_number,
+            CustomerSessionDB.restaurant_id.is_(None)
+        ).first()
+        
+        if db_session:
+            return session_db_to_model(db_session)
+        
+        # If not found, get any session for this phone number
+        db_session = db.query(CustomerSessionDB).filter(
+            CustomerSessionDB.phone_number == phone_number
+        ).first()
+        
+        if db_session:
+            return session_db_to_model(db_session)
+        
+        return None
+    finally:
+        db.close()
+
 
 def create_session(session: CustomerSession) -> CustomerSession:
     """
-    Create new customer session
-    Later: INSERT INTO sessions (...) VALUES (...)
-    Or: Redis SET session:{phone}:{restaurant_id} ...
+    Create new customer session in database
     """
-    # Use "none" as restaurant_id in key if restaurant_id is None
-    restaurant_id_key = session.restaurant_id if session.restaurant_id else "none"
-    key = f"{session.phone_number}:{restaurant_id_key}"
-    CUSTOMER_SESSIONS[key] = session
-    return session
+    db = SessionLocal()
+    try:
+        # Check if session already exists
+        existing = db.query(CustomerSessionDB).filter(
+            CustomerSessionDB.phone_number == session.phone_number
+        ).first()
+        
+        if existing:
+            # Update existing session
+            for key, value in session_model_to_db(session).items():
+                setattr(existing, key, value)
+            db.commit()
+            db.refresh(existing)
+            return session_db_to_model(existing)
+        
+        # Create new session
+        db_session = CustomerSessionDB(**session_model_to_db(session))
+        db.add(db_session)
+        db.commit()
+        db.refresh(db_session)
+        return session_db_to_model(db_session)
+    except Exception as e:
+        db.rollback()
+        print(f"Error creating session: {e}")
+        raise
+    finally:
+        db.close()
+
 
 def update_session(session: CustomerSession) -> CustomerSession:
     """
-    Update customer session
-    Later: UPDATE sessions SET ... WHERE phone_number = ? AND restaurant_id = ?
-    Or: Redis SET session:{phone}:{restaurant_id} ...
+    Update customer session in database
     """
-    # Use "none" as restaurant_id in key if restaurant_id is None
-    restaurant_id_key = session.restaurant_id if session.restaurant_id else "none"
-    key = f"{session.phone_number}:{restaurant_id_key}"
-    
-    # If restaurant_id changed, we need to delete old session and create new one
-    # Search for existing session with this phone number
-    for existing_key in list(CUSTOMER_SESSIONS.keys()):
-        if existing_key.startswith(f"{session.phone_number}:"):
-            # Found existing session, delete it if key changed
-            if existing_key != key:
-                del CUSTOMER_SESSIONS[existing_key]
-            break
-    
-    CUSTOMER_SESSIONS[key] = session
-    return session
+    db = SessionLocal()
+    try:
+        db_session = db.query(CustomerSessionDB).filter(
+            CustomerSessionDB.phone_number == session.phone_number
+        ).first()
+        
+        if not db_session:
+            # Create if doesn't exist
+            return create_session(session)
+        
+        # Update fields
+        for key, value in session_model_to_db(session).items():
+            setattr(db_session, key, value)
+        
+        db.commit()
+        db.refresh(db_session)
+        return session_db_to_model(db_session)
+    except Exception as e:
+        db.rollback()
+        print(f"Error updating session: {e}")
+        raise
+    finally:
+        db.close()
+
 
 def delete_session(phone_number: str, restaurant_id: str) -> bool:
     """
-    Delete customer session
-    Later: DELETE FROM sessions WHERE phone_number = ? AND restaurant_id = ?
-    Or: Redis DEL session:{phone}:{restaurant_id}
+    Delete customer session from database
     """
-    key = f"{phone_number}:{restaurant_id}"
-    if key in CUSTOMER_SESSIONS:
-        del CUSTOMER_SESSIONS[key]
-        return True
-    return False
-
-
+    db = SessionLocal()
+    try:
+        if restaurant_id and restaurant_id != "none":
+            db_session = db.query(CustomerSessionDB).filter(
+                CustomerSessionDB.phone_number == phone_number,
+                CustomerSessionDB.restaurant_id == restaurant_id
+            ).first()
+        else:
+            db_session = db.query(CustomerSessionDB).filter(
+                CustomerSessionDB.phone_number == phone_number,
+                CustomerSessionDB.restaurant_id.is_(None)
+            ).first()
+        
+        if db_session:
+            db.delete(db_session)
+            db.commit()
+            return True
+        return False
+    except Exception as e:
+        db.rollback()
+        print(f"Error deleting session: {e}")
+        return False
+    finally:
+        db.close()

@@ -1,47 +1,93 @@
 """
 Customer Repository - Data access layer for customers
-Later: Replace with SQLAlchemy queries
+Now using SQLAlchemy with PostgreSQL database
 """
 from typing import List, Optional
 from models.customer import Customer
-from data.customers_data import CUSTOMERS
+from database import SessionLocal
+from models_db import CustomerDB
+from model_converters import customer_db_to_model, customer_model_to_db
+from id_generator import generate_customer_id
+
 
 def get_customer_by_id(customer_id: str) -> Optional[Customer]:
     """
-    Get customer by ID
-    Later: SELECT * FROM customers WHERE id = ?
+    Get customer by ID from database
     """
-    return CUSTOMERS.get(customer_id)
+    db = SessionLocal()
+    try:
+        db_customer = db.query(CustomerDB).filter(CustomerDB.id == customer_id).first()
+        if db_customer:
+            return customer_db_to_model(db_customer)
+        return None
+    finally:
+        db.close()
+
 
 def get_customer_by_phone(phone: str) -> Optional[Customer]:
     """
-    Get customer by phone number
-    Later: SELECT * FROM customers WHERE phone = ?
+    Get customer by phone number from database
     """
-    for customer in CUSTOMERS.values():
-        if customer.phone == phone:
-            return customer
-    return None
+    db = SessionLocal()
+    try:
+        db_customer = db.query(CustomerDB).filter(CustomerDB.phone == phone).first()
+        if db_customer:
+            return customer_db_to_model(db_customer)
+        return None
+    finally:
+        db.close()
+
 
 def get_customers_by_restaurant(restaurant_id: str) -> List[Customer]:
     """
-    Get all customers for a restaurant
-    Later: SELECT * FROM customers WHERE restaurant_id = ?
+    Get all customers for a restaurant from database
     """
-    return [c for c in CUSTOMERS.values() if c.restaurant_id == restaurant_id]
+    db = SessionLocal()
+    try:
+        db_customers = db.query(CustomerDB).filter(CustomerDB.restaurant_id == restaurant_id).all()
+        return [customer_db_to_model(c) for c in db_customers]
+    finally:
+        db.close()
+
 
 def create_customer(customer: Customer) -> Customer:
     """
-    Create a new customer
-    Later: INSERT INTO customers (...) VALUES (...)
+    Create a new customer in database
+    Automatically generates 9-digit ID if not provided
     """
-    CUSTOMERS[customer.id] = customer
-    return customer
+    db = SessionLocal()
+    try:
+        # Check if customer already exists (by phone)
+        existing = db.query(CustomerDB).filter(CustomerDB.phone == customer.phone).first()
+        if existing:
+            # Update existing customer
+            for key, value in customer_model_to_db(customer).items():
+                setattr(existing, key, value)
+            db.commit()
+            db.refresh(existing)
+            return customer_db_to_model(existing)
+        
+        # Generate ID if not provided
+        if not customer.id:
+            customer.id = generate_customer_id()
+        
+        # Create new customer
+        db_customer = CustomerDB(**customer_model_to_db(customer))
+        db.add(db_customer)
+        db.commit()
+        db.refresh(db_customer)
+        return customer_db_to_model(db_customer)
+    except Exception as e:
+        db.rollback()
+        print(f"Error creating customer: {e}")
+        raise
+    finally:
+        db.close()
+
 
 def find_nearest_restaurant(customer_latitude: float, customer_longitude: float):
     """
     Find nearest restaurant based on customer location
-    Later: SELECT * FROM restaurants ORDER BY ST_Distance_Sphere(point(longitude, latitude), point(?, ?)) LIMIT 1
     """
     from repositories.restaurant_repo import get_all_restaurants
     import math
@@ -82,5 +128,3 @@ def find_nearest_restaurant(customer_latitude: float, customer_longitude: float)
             nearest_restaurant = restaurant
     
     return nearest_restaurant
-
-

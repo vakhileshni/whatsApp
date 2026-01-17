@@ -3,12 +3,12 @@ Order Service - Business logic for orders
 """
 from datetime import datetime
 from typing import List, Optional
-import uuid
 from models.order import Order, OrderItem
 from models.restaurant import Restaurant
 from repositories.order_repo import create_order, get_orders_by_restaurant, update_order_status, get_order_by_id
 from repositories.product_repo import get_product_by_id
 from repositories.restaurant_repo import get_restaurant_by_id
+from id_generator import generate_order_id, generate_order_item_id
 
 def create_new_order(
     restaurant_id: str,
@@ -46,22 +46,29 @@ def create_new_order(
         if not product.is_available:
             raise ValueError(f"Product {product.name} is not available")
         
-        item_total = product.price * quantity
+        # Use discounted price if available and valid, otherwise use regular price
+        effective_price = product.discounted_price if (
+            product.discounted_price is not None and 
+            product.discounted_price < product.price and
+            product.discounted_price > 0
+        ) else product.price
+        
+        item_total = effective_price * quantity
         subtotal += item_total
         
         order_items.append(OrderItem(
             product_id=product.id,
             product_name=product.name,
             quantity=quantity,
-            price=product.price
+            price=effective_price  # Store the effective price (discounted or regular)
         ))
     
     # Calculate delivery fee
     delivery_fee = restaurant.delivery_fee if order_type == "delivery" else 0.0
     total = subtotal + delivery_fee
     
-    # Create order
-    order_id = f"order_{uuid.uuid4().hex[:12]}"
+    # Generate 9-digit order ID
+    order_id = generate_order_id()
     now = datetime.now().isoformat()
     
     new_order = Order(
